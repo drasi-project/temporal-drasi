@@ -8,23 +8,24 @@ publish = false
 members = ["tests/plugin-fixture", "tests/other-plugin-fixture"]
 default-members = ["."]
 exclude = [
+    ".upstream/drasi-core-029e8390bfc0a6e426ace96012593e743b068f65",
     ".upstream/drasi-core-198a2fbe0e9eb5f819d4ac5cce5622252d6ffe72",
     ".upstream/drasi-core-7bf4530999d24a435db70a6ac6e07c27b26253ac",
 ]
 
 [patch."https://github.com/drasi-project/drasi-core"]
-drasi-lib = { path = ".upstream/drasi-core-198a2fbe0e9eb5f819d4ac5cce5622252d6ffe72/lib" }
-drasi-core = { path = ".upstream/drasi-core-198a2fbe0e9eb5f819d4ac5cce5622252d6ffe72/core" }
-drasi-query-ast = { path = ".upstream/drasi-core-198a2fbe0e9eb5f819d4ac5cce5622252d6ffe72/query-ast" }
-drasi-query-cypher = { path = ".upstream/drasi-core-198a2fbe0e9eb5f819d4ac5cce5622252d6ffe72/query-cypher" }
-drasi-query-gql = { path = ".upstream/drasi-core-198a2fbe0e9eb5f819d4ac5cce5622252d6ffe72/query-gql" }
-drasi-functions-cypher = { path = ".upstream/drasi-core-198a2fbe0e9eb5f819d4ac5cce5622252d6ffe72/functions-cypher" }
-drasi-functions-gql = { path = ".upstream/drasi-core-198a2fbe0e9eb5f819d4ac5cce5622252d6ffe72/functions-gql" }
-drasi-host-sdk = { path = ".upstream/drasi-core-198a2fbe0e9eb5f819d4ac5cce5622252d6ffe72/components/host-sdk" }
-drasi-plugin-sdk = { path = ".upstream/drasi-core-198a2fbe0e9eb5f819d4ac5cce5622252d6ffe72/components/plugin-sdk" }
-drasi-state-store-redb = { path = ".upstream/drasi-core-198a2fbe0e9eb5f819d4ac5cce5622252d6ffe72/components/state_stores/redb" }
-drasi-wal-redb = { path = ".upstream/drasi-core-198a2fbe0e9eb5f819d4ac5cce5622252d6ffe72/components/wals/redb" }
-drasi-index-rocksdb = { path = ".upstream/drasi-core-198a2fbe0e9eb5f819d4ac5cce5622252d6ffe72/components/indexes/rocksdb" }
+drasi-lib = { path = ".upstream/drasi-core-029e8390bfc0a6e426ace96012593e743b068f65/lib" }
+drasi-core = { path = ".upstream/drasi-core-029e8390bfc0a6e426ace96012593e743b068f65/core" }
+drasi-query-ast = { path = ".upstream/drasi-core-029e8390bfc0a6e426ace96012593e743b068f65/query-ast" }
+drasi-query-cypher = { path = ".upstream/drasi-core-029e8390bfc0a6e426ace96012593e743b068f65/query-cypher" }
+drasi-query-gql = { path = ".upstream/drasi-core-029e8390bfc0a6e426ace96012593e743b068f65/query-gql" }
+drasi-functions-cypher = { path = ".upstream/drasi-core-029e8390bfc0a6e426ace96012593e743b068f65/functions-cypher" }
+drasi-functions-gql = { path = ".upstream/drasi-core-029e8390bfc0a6e426ace96012593e743b068f65/functions-gql" }
+drasi-host-sdk = { path = ".upstream/drasi-core-029e8390bfc0a6e426ace96012593e743b068f65/components/host-sdk" }
+drasi-plugin-sdk = { path = ".upstream/drasi-core-029e8390bfc0a6e426ace96012593e743b068f65/components/plugin-sdk" }
+drasi-state-store-redb = { path = ".upstream/drasi-core-029e8390bfc0a6e426ace96012593e743b068f65/components/state_stores/redb" }
+drasi-wal-redb = { path = ".upstream/drasi-core-029e8390bfc0a6e426ace96012593e743b068f65/components/wals/redb" }
+drasi-index-rocksdb = { path = ".upstream/drasi-core-029e8390bfc0a6e426ace96012593e743b068f65/components/indexes/rocksdb" }
 
 [lib]
 crate-type = ["staticlib", "cdylib", "rlib"]

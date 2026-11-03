@@ -298,9 +298,7 @@ func (g *Graph) scheduleTopologyLocked(operations []graphOperation, problems map
 			delete(g.problems, key)
 		}
 	}
-	for key, problem := range problems {
-		g.problems[key] = problem
-	}
+	maps.Copy(g.problems, problems)
 	if g.topology == nil && !busy {
 		for _, operation := range operations {
 			if time.Since(g.attempts[operation.key]) < time.Second {

@@ -70,8 +70,8 @@ func TestChasmOutputPackages(t *testing.T) {
 			set := &descriptorpb.FileDescriptorSet{}
 			for i, value := range test.packages {
 				set.File = append(set.File, &descriptorpb.FileDescriptorProto{
-					Name:    proto.String("chasm/lib/watchassignment/proto/v1/" + []string{"state.proto", "service.proto"}[i]),
-					Options: &descriptorpb.FileOptions{GoPackage: proto.String(value)},
+					Name:    new("chasm/lib/watchassignment/proto/v1/" + []string{"state.proto", "service.proto"}[i]),
+					Options: &descriptorpb.FileOptions{GoPackage: new(value)},
 				})
 			}
 			encoded, err := proto.Marshal(set)

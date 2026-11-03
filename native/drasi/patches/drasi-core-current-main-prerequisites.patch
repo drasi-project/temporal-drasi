@@ -930,7 +930,7 @@ index 6a591008c8e59bb69092bca5be262f485ec5e09b..85811c0d905732c17ad2bd21aafcdaec
 +/// Version of the query engine linked into this build.
 +pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 diff --git a/lib/README.md b/lib/README.md
-index 4000614dfce9e70ca65e14564585497dd764e08d..1830d17276188473d8c3432c694a5b51b37e91b4 100644
+index 4000614dfce9e70ca65e14564585497dd764e08d..977c3a3fb4bf17a6544c88eefced799107a88d0e 100644
 --- a/lib/README.md
 +++ b/lib/README.md
 @@ -271,7 +271,7 @@ let config = Query::gql("active-orders")
@@ -942,25 +942,35 @@ index 4000614dfce9e70ca65e14564585497dd764e08d..1830d17276188473d8c3432c694a5b51
  | `with_middleware(SourceMiddlewareConfig)` | Add middleware transformation | `[]` |
  | `build() -> QueryConfig` | Build the configuration | — |
  
-@@ -289,7 +289,7 @@ those checkpoints still preserve a committed sequence-zero result snapshot.
+@@ -288,9 +288,11 @@ those checkpoints still preserve a committed sequence-zero result snapshot.
+ `RecoveryPolicy::Strict` refuses a matching bootstrap-enabled query configuration
  that has no committed result sequence. Source checkpoints alone do not prove
  that the initial result snapshot was persisted. Replacement bootstraps after a
- configuration change or `AutoReset` retain the existing reset-in-progress marker
+-configuration change or `AutoReset` retain the existing reset-in-progress marker
 -until their handover commits. A reset-created result sequence zero alone does not
-+until publication marks their handover complete. A reset-created result sequence zero alone does not
- prove completion: `Strict` rejects an interrupted replacement, while `AutoReset`
+-prove completion: `Strict` rejects an interrupted replacement, while `AutoReset`
++configuration change or `AutoReset` retain an incomplete marker throughout the
++wipe and replacement publication, including failures before source subscription.
++Only a committed, verified replacement publishes its ordinary or certified hash.
++A reset-created result sequence zero alone does not prove completion:
++`Strict` rejects an interrupted replacement, while `AutoReset`
  clears partial indexes and bootstraps again.
  The explicit `AutoReset` policy rebuilds output, indexes and checkpoints from
-@@ -453,7 +453,7 @@ are returned after the remaining cleanup is attempted. Repeated calls are safe;
+ available source snapshots/replay. Before upgrading an existing persistent
+@@ -453,8 +455,10 @@ are returned after the remaining cleanup is attempted. Repeated calls are safe;
  concurrent shutdown calls wait for teardown to complete.
  
  Application sources finish any in-flight WAL pruning before stopping. Queries
 -join all bootstrap workers but cancel blocked bootstrap-completion dispatch
-+join the bootstrap-owning processor but cancel blocked bootstrap-completion dispatch
- during stop, so an undrained result subscription cannot hold shutdown open.
+-during stop, so an undrained result subscription cannot hold shutdown open.
++join the bootstrap-owning processor but cancel blocked bootstrap-control and live
++result dispatch during stop, so an undrained subscription cannot hold shutdown
++open. Durable commits and their in-memory output updates finish before delivery
++can be cancelled; the committed outbox remains available for replay.
  
  After shutdown, drop all `DrasiLib` clones and caller-held component/provider
-@@ -1038,6 +1038,156 @@ downstream checkpoint consequences considered. The existing opt-in query
+ handles before reopening injected state stores or WAL providers at the same
+@@ -1038,6 +1042,160 @@ downstream checkpoint consequences considered. The existing opt-in query
  outbox is not a safe migration. This change performs no automatic migration and
  does not change recovery policies.
  
@@ -1022,9 +1032,13 @@ index 4000614dfce9e70ca65e14564585497dd764e08d..1830d17276188473d8c3432c694a5b51
 +Changing a source from streaming-only
 +to bootstrap-enabled can refuse recovery if its saved handover has no opaque
 +position.
++Unreadable source checkpoints refuse certified recovery, including streaming-only
++queries and default-mode reopen of an already certified image. Only the legacy,
++non-certified streaming-only path retains its existing read-error fallback.
 +
 +Stopping joins the owned processor before releasing source positions or reporting
-+`Stopped`. A join timeout retains the task and returns an error; a failed task join
++`Stopped`. Subscription handles remain owned until each join completes, even if a
++stop caller is cancelled. A join timeout retains the task and returns an error; a failed task join
 +continues to fail later stops. Permanent shutdown propagates stop failures and
 +retains the graph loop and persistent handles. Retrying shutdown after a cancelled
 +or timed-out attempt joins unfinished work before releasing those handles.
@@ -3625,10 +3639,10 @@ index 6b65dd95710d2b9d5fb2cc04288ddbbd4e8988a7..da0adf2d31d8947e523793c4a9ee45ff
  }
 diff --git a/lib/src/queries/e2e_checkpoint_tests/bootstrap_publication_tests.rs b/lib/src/queries/e2e_checkpoint_tests/bootstrap_publication_tests.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..139824ea5605cf2ac5aa93901636179385ea33d9
+index 0000000000000000000000000000000000000000..7127a167a7db04300f2a8bb1e16f5b85945ee6a0
 --- /dev/null
 +++ b/lib/src/queries/e2e_checkpoint_tests/bootstrap_publication_tests.rs
-@@ -0,0 +1,1135 @@
+@@ -0,0 +1,1431 @@
 +// Copyright 2025 The Drasi Authors.
 +//
 +// Licensed under the Apache License, Version 2.0 (the "License");
@@ -4012,6 +4026,302 @@ index 0000000000000000000000000000000000000000..139824ea5605cf2ac5aa939016361793
 +    let count = source.subscribe_count_handle();
 +    core.add_source(source).await.unwrap();
 +    count
++}
++
++#[rstest::rstest]
++#[case::config_change(false)]
++#[case::output_corruption(true)]
++#[tokio::test]
++#[serial]
++async fn review_failed_replacement_remains_fenced(#[case] corrupt_output: bool) {
++    let tmp = tempfile::TempDir::new().unwrap();
++    let config = bootstrap_query(RecoveryPolicy::AutoReset);
++    let hash = crate::queries::compute_config_hash(&config);
++    let core = build_compatible_e2e_lib("replacement", &tmp, None)
++        .await
++        .unwrap();
++    add_bootstrap_source(&core).await;
++    core.add_query(config.clone()).await.unwrap();
++    core.start().await.unwrap();
++    core.start_source("bootstrap-src").await.unwrap();
++    core.start_query("bootstrap-q").await.unwrap();
++    let query = core
++        .query_manager()
++        .get_query_instance("bootstrap-q")
++        .await
++        .unwrap();
++    query.fetch_snapshot().await.unwrap();
++    drop(query);
++    core.shutdown().await.unwrap();
++    drop(core);
++    {
++        let provider = RocksDbIndexProvider::new(tmp.path(), false, false);
++        let indexes = provider.create_indexes("bootstrap-q").await.unwrap();
++        if corrupt_output {
++            indexes
++                .outbox_writer
++                .as_ref()
++                .unwrap()
++                .append("bootstrap-q", 1, b"corrupt")
++                .await
++                .unwrap();
++        } else {
++            indexes
++                .checkpoint_store
++                .as_ref()
++                .unwrap()
++                .write_config_hash(hash ^ 1)
++                .await
++                .unwrap();
++        }
++    }
++
++    let core = build_compatible_e2e_lib("replacement", &tmp, None)
++        .await
++        .unwrap();
++    core.add_source(E2eTestSource::new("bootstrap-src", false).unwrap())
++        .await
++        .unwrap();
++    core.add_query(config.clone()).await.unwrap();
++    core.start().await.unwrap();
++    core.start_source("bootstrap-src").await.unwrap();
++    let error = core.start_query("bootstrap-q").await.unwrap_err();
++    assert!(
++        error.to_string().contains("do not support replay"),
++        "{error}"
++    );
++    core.shutdown().await.unwrap();
++    drop(core);
++
++    let before = logical_rocks_state(tmp.path(), "bootstrap-q");
++    let core = build_compatible_e2e_lib("replacement", &tmp, None)
++        .await
++        .unwrap();
++    let subscriptions = add_bootstrap_source(&core).await;
++    let mut strict_config = config;
++    strict_config.recovery_policy = Some(RecoveryPolicy::Strict);
++    core.add_query(strict_config).await.unwrap();
++    core.start().await.unwrap();
++    core.start_source("bootstrap-src").await.unwrap();
++    let start = core.start_query("bootstrap-q").await;
++    core.shutdown().await.unwrap();
++    drop(core);
++    assert!(
++        start.is_err(),
++        "Strict accepted a replacement without its initial image"
++    );
++    assert_eq!(subscriptions.load(Ordering::Acquire), 0);
++    assert_eq!(logical_rocks_state(tmp.path(), "bootstrap-q"), before);
++}
++
++#[rstest::rstest]
++#[case::compatible_reset(false, false)]
++#[case::certified_reset(true, false)]
++#[case::compatible_publication(false, true)]
++#[case::certified_publication(true, true)]
++#[tokio::test]
++#[serial]
++async fn review_interrupted_bootstrap_reset_requires_auto_reset(
++    #[case] certified: bool,
++    #[case] publication_pending: bool,
++    #[values(RecoveryPolicy::Strict, RecoveryPolicy::AutoReset)] policy: RecoveryPolicy,
++) {
++    let tmp = tempfile::TempDir::new().unwrap();
++    let config = bootstrap_query(RecoveryPolicy::Strict);
++    let core = build_e2e_lib_with_certification("reset", &tmp, None, certified)
++        .await
++        .unwrap();
++    add_bootstrap_source(&core).await;
++    core.add_query(config.clone()).await.unwrap();
++    core.start().await.unwrap();
++    core.start_source("bootstrap-src").await.unwrap();
++    core.start_query("bootstrap-q").await.unwrap();
++    let query = core
++        .query_manager()
++        .get_query_instance("bootstrap-q")
++        .await
++        .unwrap();
++    query.fetch_snapshot().await.unwrap();
++    drop(query);
++    core.shutdown().await.unwrap();
++    drop(core);
++    {
++        let provider = RocksDbIndexProvider::new(tmp.path(), false, false);
++        let indexes = provider.create_indexes("bootstrap-q").await.unwrap();
++        let hash = crate::queries::compute_config_hash(&config);
++        indexes
++            .checkpoint_store
++            .as_ref()
++            .unwrap()
++            .write_config_hash(if publication_pending {
++                hash.wrapping_add(4)
++            } else {
++                !hash
++            })
++            .await
++            .unwrap();
++    }
++    let before = logical_rocks_state(tmp.path(), "bootstrap-q");
++    let core = build_e2e_lib_with_certification("reset", &tmp, None, certified)
++        .await
++        .unwrap();
++    let subscriptions = add_bootstrap_source(&core).await;
++    let mut config = config;
++    config.recovery_policy = Some(policy);
++    core.add_query(config).await.unwrap();
++    core.start().await.unwrap();
++    core.start_source("bootstrap-src").await.unwrap();
++    let start = core.start_query("bootstrap-q").await;
++    if policy == RecoveryPolicy::AutoReset {
++        start.unwrap();
++        let query = core
++            .query_manager()
++            .get_query_instance("bootstrap-q")
++            .await
++            .unwrap();
++        let snapshot = query.fetch_snapshot().await.unwrap();
++        assert_eq!(
++            snapshot.to_vec(),
++            vec![serde_json::json!({"id": "seed", "value": 1})]
++        );
++        assert_eq!(snapshot.output_generation, 1);
++        assert_eq!(subscriptions.load(Ordering::Acquire), 1);
++    } else {
++        assert!(
++            start.is_err(),
++            "Strict completed an interrupted bootstrap reset"
++        );
++        assert_eq!(subscriptions.load(Ordering::Acquire), 0);
++    }
++    core.shutdown().await.unwrap();
++    drop(core);
++    if policy == RecoveryPolicy::Strict {
++        assert_eq!(logical_rocks_state(tmp.path(), "bootstrap-q"), before);
++    }
++}
++
++#[rstest::rstest]
++#[case::legacy_fallback(false, false)]
++#[case::requested_certification(false, true)]
++#[case::published_certification(true, false)]
++#[case::published_and_requested(true, true)]
++#[tokio::test]
++#[serial]
++async fn review_checkpoint_read_failure_respects_certification(
++    #[case] published: bool,
++    #[case] required: bool,
++    #[values(RecoveryPolicy::Strict, RecoveryPolicy::AutoReset)] policy: RecoveryPolicy,
++) {
++    let tmp = tempfile::TempDir::new().unwrap();
++    let config = make_persistent_query("stream", "source", Some(policy));
++    let core = build_e2e_lib_with_certification("checkpoint-read", &tmp, None, published)
++        .await
++        .unwrap();
++    let source = E2eTestSource::new("source", true).unwrap();
++    let events = source.event_sender();
++    core.add_source(source).await.unwrap();
++    core.add_query(config.clone()).await.unwrap();
++    core.start().await.unwrap();
++    core.start_source("source").await.unwrap();
++    core.start_query("stream").await.unwrap();
++    send_event(&events, "source", 1, b"retained-position").await;
++    wait_for_outbox_sequence(&core, "stream", 1).await;
++    core.shutdown().await.unwrap();
++    drop(core);
++    let before = logical_rocks_state(tmp.path(), "stream");
++    let core = DrasiLib::builder()
++        .with_bootstrap_certification(required)
++        .with_index_provider(
++            "persistent",
++            Arc::new(RecoveryTestProvider {
++                inner: RocksDbIndexProvider::new(tmp.path(), false, false),
++                failure: Arc::new(Mutex::new(RecoveryReadFailure::Checkpoints)),
++            }),
++        )
++        .build()
++        .await
++        .unwrap();
++    let source = E2eTestSource::new("source", true).unwrap();
++    let subscriptions = source.subscribe_count_handle();
++    core.add_source(source).await.unwrap();
++    core.add_query(config).await.unwrap();
++    core.start().await.unwrap();
++    core.start_source("source").await.unwrap();
++    let start = core.start_query("stream").await;
++    core.shutdown().await.unwrap();
++    drop(core);
++    if published || required {
++        assert!(
++            start.is_err(),
++            "certified recovery ignored an unreadable checkpoint"
++        );
++        assert_eq!(subscriptions.load(Ordering::Acquire), 0);
++    } else {
++        start.unwrap();
++        assert_eq!(subscriptions.load(Ordering::Acquire), 1);
++    }
++    assert_eq!(logical_rocks_state(tmp.path(), "stream"), before);
++}
++
++#[tokio::test]
++#[serial]
++async fn review_live_delivery_shutdown_preserves_committed_output() {
++    let tmp = tempfile::TempDir::new().unwrap();
++    let core = build_e2e_lib("blocked-delivery", &tmp, None).await.unwrap();
++    let source = E2eTestSource::new("source", true).unwrap();
++    let events = source.event_sender();
++    core.add_source(source).await.unwrap();
++    let mut config = make_persistent_query("stream", "source", None);
++    config.dispatch_mode = Some(crate::DispatchMode::Channel);
++    config.dispatch_buffer_capacity = Some(1);
++    core.add_query(config).await.unwrap();
++    core.start().await.unwrap();
++    core.start_source("source").await.unwrap();
++    core.start_query("stream").await.unwrap();
++    let query = core
++        .query_manager()
++        .get_query_instance("stream")
++        .await
++        .unwrap();
++    let subscription = query.subscribe("retained".into()).await.unwrap();
++    send_event(&events, "source", 1, b"position-1").await;
++    send_event(&events, "source", 2, b"position-2").await;
++    wait_for_outbox_sequence(&core, "stream", 2).await;
++    let stopped =
++        tokio::time::timeout(std::time::Duration::from_secs(2), core.stop_query("stream")).await;
++    drop(subscription);
++    core.shutdown().await.unwrap();
++    assert!(
++        stopped.is_ok(),
++        "an undrained result channel blocked shutdown"
++    );
++    stopped.unwrap().unwrap();
++    assert_eq!(query.status().await, ComponentStatus::Stopped);
++    drop(query);
++    drop(core);
++    let core = build_e2e_lib("blocked-delivery", &tmp, None).await.unwrap();
++    core.add_source(E2eTestSource::new("source", true).unwrap())
++        .await
++        .unwrap();
++    core.add_query(make_persistent_query(
++        "stream",
++        "source",
++        Some(RecoveryPolicy::ExistingOnly),
++    ))
++    .await
++    .unwrap();
++    core.start().await.unwrap();
++    core.start_source("source").await.unwrap();
++    core.start_query("stream").await.unwrap();
++    let recovered = wait_for_outbox_sequence(&core, "stream", 2).await;
++    assert_eq!(recovered.results.len(), 2);
++    let query = core
++        .query_manager()
++        .get_query_instance("stream")
++        .await
++        .unwrap();
++    assert_eq!(query.fetch_snapshot().await.unwrap().len(), 2);
++    core.shutdown().await.unwrap();
 +}
 +
 +#[rstest::rstest]
@@ -4765,7 +5075,7 @@ index 0000000000000000000000000000000000000000..139824ea5605cf2ac5aa939016361793
 +    }
 +}
 diff --git a/lib/src/queries/manager.rs b/lib/src/queries/manager.rs
-index 3d6628e35edca8f4c2dd977101c60b4540ea6b91..9086014ba70e0f864ff883b47b98fdf3e8b0de67 100644
+index 3d6628e35edca8f4c2dd977101c60b4540ea6b91..2bb9f8d6da09eac4140fb6d1988845a49bbb0497 100644
 --- a/lib/src/queries/manager.rs
 +++ b/lib/src/queries/manager.rs
 @@ -14,11 +14,12 @@
@@ -4838,7 +5148,7 @@ index 3d6628e35edca8f4c2dd977101c60b4540ea6b91..9086014ba70e0f864ff883b47b98fdf3
  
          timeout(Duration::from_secs(2), async {
              if terminal_shutdown {
-@@ -554,18 +557,142 @@ mod tests {
+@@ -554,18 +557,254 @@ mod tests {
          })
          .await??;
          assert_eq!(query.status().await, ComponentStatus::Stopped);
@@ -4849,6 +5159,118 @@ index 3d6628e35edca8f4c2dd977101c60b4540ea6b91..9086014ba70e0f864ff883b47b98fdf3
          core.shutdown().await?;
          Ok(())
      }
++
++    #[tokio::test]
++    async fn review_full_retained_channel_does_not_block_bootstrap_start() -> Result<()> {
++        use crate::sources::tests::TestBootstrapMockSource;
++        use std::time::Duration;
++        use tokio::time::timeout;
++
++        let (sender, receiver) = tokio::sync::mpsc::channel(1);
++        drop(sender);
++        let core = crate::DrasiLib::builder()
++            .with_source(TestBootstrapMockSource::new("source".into(), receiver)?)
++            .with_query(
++                crate::Query::cypher("query")
++                    .query("MATCH (n) RETURN n")
++                    .from_source("source")
++                    .with_dispatch_mode(crate::DispatchMode::Channel)
++                    .with_dispatch_buffer_capacity(1)
++                    .build(),
++            )
++            .build()
++            .await?;
++        core.start().await?;
++        let instance = core
++            .query_manager()
++            .get_query_instance("query")
++            .await
++            .map_err(anyhow::Error::msg)?;
++        let query = instance.as_any().downcast_ref::<DrasiQuery>().unwrap();
++        let subscription = query.subscribe("retained".into()).await?;
++        core.stop_query("query").await?;
++        crate::component_graph::wait_for_status(
++            &core.component_graph(),
++            "query",
++            &[ComponentStatus::Stopped],
++            Duration::from_secs(2),
++        )
++        .await?;
++        query
++            .base
++            .dispatch_query_result(QueryResult::new(
++                "query".into(),
++                1,
++                chrono::Utc::now(),
++                vec![],
++                HashMap::new(),
++            ))
++            .await?;
++        let source = query
++            .source_manager
++            .get_source_instance("source")
++            .await
++            .unwrap();
++        let source = source
++            .as_any()
++            .downcast_ref::<TestBootstrapMockSource>()
++            .unwrap();
++        let (sender, receiver) = tokio::sync::mpsc::channel(1);
++        source.set_bootstrap_receiver(receiver).await;
++        drop(sender);
++        let started = timeout(Duration::from_secs(2), core.start_query("query")).await;
++        let stopped = timeout(Duration::from_secs(2), core.stop_query("query")).await;
++        drop(subscription);
++        core.shutdown().await?;
++        assert!(
++            started.is_ok(),
++            "bootstrapStarted blocked before the owned processor existed"
++        );
++        started??;
++        stopped??;
++        assert_eq!(query.status().await, ComponentStatus::Stopped);
++        assert!(query.base.task_handle.read().await.is_none());
++        Ok(())
++    }
++
++    #[tokio::test]
++    async fn review_cancelled_stop_retains_subscription_join_ownership() -> Result<()> {
++        let core = crate::DrasiLib::builder()
++            .with_query(
++                crate::Query::cypher("query")
++                    .query("MATCH (n) RETURN n")
++                    .auto_start(false)
++                    .build(),
++            )
++            .build()
++            .await?;
++        let instance = core
++            .query_manager()
++            .get_query_instance("query")
++            .await
++            .map_err(anyhow::Error::msg)?;
++        let query = instance.as_any().downcast_ref::<DrasiQuery>().unwrap();
++        query.base.set_status(ComponentStatus::Running, None).await;
++        for _ in 0..2 {
++            query
++                .subscription_tasks
++                .write()
++                .await
++                .push(tokio::spawn(std::future::pending()));
++        }
++        tokio::task::yield_now().await;
++        let mut stop = Box::pin(query.stop());
++        assert!(futures::poll!(stop.as_mut()).is_pending());
++        drop(stop);
++        assert!(
++            !query.subscription_tasks.read().await.is_empty(),
++            "cancelled stop detached drained subscription handles",
++        );
++        query.stop().await?;
++        assert!(query.subscription_tasks.read().await.is_empty());
++        assert_eq!(query.status().await, ComponentStatus::Stopped);
++        Ok(())
++    }
 +
 +    #[rstest::rstest]
 +    #[case::processor("processor")]
@@ -4982,7 +5404,7 @@ index 3d6628e35edca8f4c2dd977101c60b4540ea6b91..9086014ba70e0f864ff883b47b98fdf3
      /// Stop the query and release its active subscriptions and processing tasks.
      ///
      /// Failed starts and processing errors can leave resources behind, so this
-@@ -653,13 +780,29 @@ pub trait Query: Send + Sync {
+@@ -653,13 +892,29 @@ pub trait Query: Send + Sync {
      ///
      /// Default: no-op — volatile/in-memory queries hold no such handles.
      async fn release_persistent_handles(&self) {}
@@ -5013,7 +5435,71 @@ index 3d6628e35edca8f4c2dd977101c60b4540ea6b91..9086014ba70e0f864ff883b47b98fdf3
      Completed,
  }
  
-@@ -1008,82 +1151,27 @@ async fn dispatch_query_results(
+@@ -932,14 +1187,15 @@ async fn dispatch_query_results(
+     profiling: crate::profiling::ProfilingMetadata,
+     output_metrics: &Arc<QueryOutputMetrics>,
+     staged_result: Option<QueryResult>,
+-) {
++    shutdown: &mut tokio::sync::oneshot::Receiver<()>,
++) -> bool {
+     let converted_results = if let Some(staged) = &staged_result {
+         staged.results.clone()
+     } else {
+         evaluation_contexts_to_diffs(results)
+     };
+     if converted_results.is_empty() {
+-        return;
++        return true;
+     }
+ 
+     let arc_result = {
+@@ -998,92 +1254,77 @@ async fn dispatch_query_results(
+     // Publish after releasing output_state so a full Channel backpressures
+     // the query instead of deadlocking snapshot/outbox fetches or dropping
+     // the tail. Subscribe still samples the head and attaches under that lock.
+-    let dispatcher_list = dispatchers.read().await;
+-    for dispatcher in dispatcher_list.iter() {
+-        if let Err(e) = dispatcher.dispatch_change(arc_result.clone()).await {
+-            debug!("Failed to dispatch result for query '{query_id}': {e}");
++    dispatch_unless_stopping(query_id, arc_result, dispatchers, shutdown).await
++}
++
++async fn dispatch_unless_stopping(
++    query_id: &str,
++    result: Arc<QueryResult>,
++    dispatchers: &RwLock<Vec<Box<dyn ChangeDispatcher<QueryResult> + Send + Sync>>>,
++    shutdown: &mut tokio::sync::oneshot::Receiver<()>,
++) -> bool {
++    tokio::select! {
++        biased;
++        _ = &mut *shutdown => false,
++        _ = async {
++            for dispatcher in dispatchers.read().await.iter() {
++                if let Err(error) = dispatcher.dispatch_change(result.clone()).await {
++                    debug!("Query '{query_id}' result dispatch failed: {error}");
++                }
++            }
++        } => true,
++    }
++}
++
++async fn abort_subscription_tasks(
++    query_id: &str,
++    tasks: &RwLock<Vec<tokio::task::JoinHandle<()>>>,
++) {
++    let mut tasks = tasks.write().await;
++    for task in tasks.iter() {
++        task.abort();
++    }
++    while let Some(task) = tasks.last_mut() {
++        if let Err(error) = task.await {
++            if !error.is_cancelled() {
++                warn!("Query '{query_id}' subscription forwarder failed: {error}");
++            }
+         }
++        tasks.pop();
+     }
+ }
  
  /// Durable stores used to hydrate and wipe query output.
  struct DurableOutputStores {
@@ -5103,10 +5589,18 @@ index 3d6628e35edca8f4c2dd977101c60b4540ea6b91..9086014ba70e0f864ff883b47b98fdf3
 +    current_hash.wrapping_add(4)
 +}
 +
++fn rebuilt_config_hash(current_hash: u64, bootstrap: BootstrapRecovery) -> u64 {
++    if bootstrap == BootstrapRecovery::NotRequired {
++        current_hash
++    } else {
++        bootstrap_in_progress_hash(current_hash)
++    }
++}
++
  async fn persisted_output_generation(
      stores: &DurableOutputStores,
      query_id: &str,
-@@ -1233,10 +1321,7 @@ async fn load_durable_output(
+@@ -1233,10 +1474,7 @@ async fn load_durable_output(
          (Vec::new(), false)
      };
  
@@ -5118,7 +5612,7 @@ index 3d6628e35edca8f4c2dd977101c60b4540ea6b91..9086014ba70e0f864ff883b47b98fdf3
          let checkpoints = stores
              .checkpoint_store
              .read_all_checkpoints()
-@@ -1244,26 +1329,27 @@ async fn load_durable_output(
+@@ -1244,26 +1482,27 @@ async fn load_durable_output(
              .map_err(|e| DurableOutputInconsistency::ReadFailed {
                  message: format!("failed to read bootstrap checkpoints: {e}"),
              })?;
@@ -5160,22 +5654,23 @@ index 3d6628e35edca8f4c2dd977101c60b4540ea6b91..9086014ba70e0f864ff883b47b98fdf3
  
      let mut outbox_entries = Vec::with_capacity(raw_outbox.len());
      for (sequence, data) in raw_outbox {
-@@ -1339,13 +1425,11 @@ struct PersistentIndexHandles<'a> {
+@@ -1339,13 +1578,11 @@ struct PersistentIndexHandles<'a> {
      future_queue: &'a Option<Arc<dyn drasi_core::interface::FutureQueue>>,
  }
  
 -/// Wipe graph indexes and source checkpoints, retaining the reset marker
 -/// when bootstrap still needs to commit its replacement snapshot.
-+/// Wipe graph indexes and source checkpoints, then persist `current_hash`.
++/// Wipe graph indexes and source checkpoints, then persist the rebuild marker.
  /// Used by config-hash mismatch and by AutoReset after output inconsistency.
  async fn wipe_indexes_and_checkpoints(
      query_id: &str,
-     current_hash: u64,
+-    current_hash: u64,
 -    bootstrap_pending: bool,
++    rebuilt_hash: u64,
      checkpoint_store: &Arc<dyn CheckpointStore>,
      indexes: PersistentIndexHandles<'_>,
  ) -> anyhow::Result<()> {
-@@ -1380,11 +1464,7 @@ async fn wipe_indexes_and_checkpoints(
+@@ -1380,11 +1617,7 @@ async fn wipe_indexes_and_checkpoints(
          .await
          .with_context(|| format!("Query '{query_id}' failed to clear checkpoints"))?;
      checkpoint_store
@@ -5184,11 +5679,11 @@ index 3d6628e35edca8f4c2dd977101c60b4540ea6b91..9086014ba70e0f864ff883b47b98fdf3
 -        } else {
 -            current_hash
 -        })
-+        .write_config_hash(current_hash)
++        .write_config_hash(rebuilt_hash)
          .await
          .with_context(|| format!("Query '{query_id}' failed to write config hash after rebuild"))?;
      Ok(())
-@@ -1396,7 +1476,6 @@ async fn wipe_indexes_and_checkpoints(
+@@ -1396,7 +1629,6 @@ async fn wipe_indexes_and_checkpoints(
  async fn autoreset_rebuild_after_output_inconsistency(
      query_id: &str,
      current_hash: u64,
@@ -5196,23 +5691,17 @@ index 3d6628e35edca8f4c2dd977101c60b4540ea6b91..9086014ba70e0f864ff883b47b98fdf3
      plan: OutputGenerationPlan,
      output_state: &RwLock<QueryOutputState>,
      stores: &DurableOutputStores,
-@@ -1416,14 +1495,7 @@ async fn autoreset_rebuild_after_output_inconsistency(
-         .write()
-         .await
+@@ -1418,8 +1650,7 @@ async fn autoreset_rebuild_after_output_inconsistency(
          .reset_from_generation(plan.persisted);
--    wipe_indexes_and_checkpoints(
--        query_id,
+     wipe_indexes_and_checkpoints(
+         query_id,
 -        current_hash,
 -        bootstrap_pending,
--        &stores.checkpoint_store,
--        indexes,
--    )
--    .await
-+    wipe_indexes_and_checkpoints(query_id, current_hash, &stores.checkpoint_store, indexes).await
- }
- 
- /// Like [`autoreset_rebuild_after_output_inconsistency`], but the caller already
-@@ -1432,7 +1504,6 @@ async fn autoreset_rebuild_after_output_inconsistency(
++        rebuilt_config_hash(current_hash, stores.bootstrap),
+         &stores.checkpoint_store,
+         indexes,
+     )
+@@ -1432,7 +1663,6 @@ async fn autoreset_rebuild_after_output_inconsistency(
  async fn rebuild_output_and_indexes_in_open_session(
      query_id: &str,
      current_hash: u64,
@@ -5220,7 +5709,7 @@ index 3d6628e35edca8f4c2dd977101c60b4540ea6b91..9086014ba70e0f864ff883b47b98fdf3
      plan: OutputGenerationPlan,
      output_state: &RwLock<QueryOutputState>,
      stores: &DurableOutputStores,
-@@ -1470,11 +1541,7 @@ async fn rebuild_output_and_indexes_in_open_session(
+@@ -1470,11 +1700,7 @@ async fn rebuild_output_and_indexes_in_open_session(
          .with_context(|| format!("Query '{query_id}' failed to clear checkpoints"))?;
      stores
          .checkpoint_store
@@ -5229,11 +5718,11 @@ index 3d6628e35edca8f4c2dd977101c60b4540ea6b91..9086014ba70e0f864ff883b47b98fdf3
 -        } else {
 -            current_hash
 -        })
-+        .write_config_hash(current_hash)
++        .write_config_hash(rebuilt_config_hash(current_hash, stores.bootstrap))
          .await
          .with_context(|| format!("Query '{query_id}' failed to write config hash after rebuild"))?;
      Ok(())
-@@ -1494,16 +1561,8 @@ pub struct DrasiQuery {
+@@ -1494,16 +1720,8 @@ pub struct DrasiQuery {
      source_manager: Arc<SourceManager>,
      // Track subscription tasks for cleanup
      subscription_tasks: Arc<RwLock<Vec<tokio::task::JoinHandle<()>>>>,
@@ -5252,7 +5741,7 @@ index 3d6628e35edca8f4c2dd977101c60b4540ea6b91..9086014ba70e0f864ff883b47b98fdf3
      // Track bootstrap state per source
      bootstrap_state: Arc<RwLock<HashMap<String, BootstrapPhase>>>,
      // IndexFactory for creating storage backend indexes
-@@ -1522,6 +1581,7 @@ pub struct DrasiQuery {
+@@ -1522,6 +1740,7 @@ pub struct DrasiQuery {
      bootstrap_timeout: std::time::Duration,
      // Resolved recovery policy: per-query → global default → Strict
      resolved_recovery_policy: crate::recovery::RecoveryPolicy,
@@ -5260,7 +5749,7 @@ index 3d6628e35edca8f4c2dd977101c60b4540ea6b91..9086014ba70e0f864ff883b47b98fdf3
      // Track which source IDs we subscribed to, for cleanup in stop()
      subscribed_source_ids: Arc<RwLock<Vec<String>>>,
      // Per-query output metrics (outbox, sequence, snapshot health)
-@@ -1529,6 +1589,11 @@ pub struct DrasiQuery {
+@@ -1529,6 +1748,11 @@ pub struct DrasiQuery {
  }
  
  impl DrasiQuery {
@@ -5272,7 +5761,7 @@ index 3d6628e35edca8f4c2dd977101c60b4540ea6b91..9086014ba70e0f864ff883b47b98fdf3
      pub fn new(
          instance_id: impl Into<String>,
          config: QueryConfig,
-@@ -1561,8 +1626,8 @@ impl DrasiQuery {
+@@ -1561,8 +1785,8 @@ impl DrasiQuery {
              priority_queue,
              source_manager,
              subscription_tasks: Arc::new(RwLock::new(Vec::new())),
@@ -5283,7 +5772,7 @@ index 3d6628e35edca8f4c2dd977101c60b4540ea6b91..9086014ba70e0f864ff883b47b98fdf3
              bootstrap_state: Arc::new(RwLock::new(HashMap::new())),
              index_factory,
              middleware_registry,
-@@ -1572,6 +1637,7 @@ impl DrasiQuery {
+@@ -1572,6 +1796,7 @@ impl DrasiQuery {
              live_results_writer: Arc::new(RwLock::new(None)),
              bootstrap_timeout,
              resolved_recovery_policy,
@@ -5291,7 +5780,7 @@ index 3d6628e35edca8f4c2dd977101c60b4540ea6b91..9086014ba70e0f864ff883b47b98fdf3
              subscribed_source_ids: Arc::new(RwLock::new(Vec::new())),
              output_metrics: Arc::new(QueryOutputMetrics::new()),
          })
-@@ -1635,6 +1701,18 @@ impl DrasiQuery {
+@@ -1635,6 +1860,18 @@ impl DrasiQuery {
  
  #[cfg(test)]
  impl DrasiQuery {
@@ -5310,7 +5799,7 @@ index 3d6628e35edca8f4c2dd977101c60b4540ea6b91..9086014ba70e0f864ff883b47b98fdf3
      /// Count active subscription forwarder tasks (testing helper)
      pub async fn subscription_task_count(&self) -> usize {
          self.subscription_tasks.read().await.len()
-@@ -1707,9 +1785,28 @@ async fn clear_persistent_indexes(
+@@ -1707,9 +1944,28 @@ async fn clear_persistent_indexes(
      Ok(())
  }
  
@@ -5342,7 +5831,7 @@ index 3d6628e35edca8f4c2dd977101c60b4540ea6b91..9086014ba70e0f864ff883b47b98fdf3
          log_component_start("Query", &self.base.config.id);
  
          self.bootstrap_state.write().await.clear();
-@@ -1876,6 +1973,20 @@ impl Query for DrasiQuery {
+@@ -1876,6 +2132,20 @@ impl Query for DrasiQuery {
          // Persist the checkpoint_store for future stop/start cycles
          *self.checkpoint_store.write().await = Some(checkpoint_store.clone());
  
@@ -5363,7 +5852,7 @@ index 3d6628e35edca8f4c2dd977101c60b4540ea6b91..9086014ba70e0f864ff883b47b98fdf3
          let continuous_query = match builder.try_build().await {
              Ok(query) => query,
              Err(e) => {
-@@ -1942,7 +2053,27 @@ impl Query for DrasiQuery {
+@@ -1942,7 +2212,27 @@ impl Query for DrasiQuery {
          // incorrect results.
          let mut subscription_settings = subscription_settings;
          let has_persistent_backend = checkpoint_store.is_persistent();
@@ -5391,7 +5880,7 @@ index 3d6628e35edca8f4c2dd977101c60b4540ea6b91..9086014ba70e0f864ff883b47b98fdf3
          let mut checkpoint_sequences_per_source: std::collections::HashMap<String, u64> =
              std::collections::HashMap::new();
          if has_persistent_backend {
-@@ -1950,13 +2081,15 @@ impl Query for DrasiQuery {
+@@ -1950,13 +2240,15 @@ impl Query for DrasiQuery {
              // a full re-bootstrap. If the stored hash doesn't match the current
              // config, all checkpoints are cleared so sources bootstrap from scratch.
              //
@@ -5412,15 +5901,15 @@ index 3d6628e35edca8f4c2dd977101c60b4540ea6b91..9086014ba70e0f864ff883b47b98fdf3
                          .await
                          .context("Failed to begin session for config hash check")?,
                  ),
-@@ -1964,6 +2097,7 @@ impl Query for DrasiQuery {
+@@ -1964,6 +2256,7 @@ impl Query for DrasiQuery {
              };
  
              let stores = DurableOutputStores {
-+                bootstrap: BootstrapRecovery::NotRequired,
++                bootstrap: bootstrap_recovery,
                  checkpoint_store: checkpoint_store.clone(),
                  outbox_writer: self.outbox_writer.read().await.clone(),
                  live_results_writer: self.live_results_writer.read().await.clone(),
-@@ -1976,68 +2110,74 @@ impl Query for DrasiQuery {
+@@ -1976,68 +2269,76 @@ impl Query for DrasiQuery {
                  future_queue: &future_queue,
              };
  
@@ -5537,15 +6026,17 @@ index 3d6628e35edca8f4c2dd977101c60b4540ea6b91..9086014ba70e0f864ff883b47b98fdf3
 +                        || stored_hash == bootstrap_in_progress_hash(current_hash) =>
                  {
 +                    anyhow::ensure!(
-+                        stored_hash != bootstrap_in_progress_hash(current_hash)
-+                            || recovery_policy == crate::recovery::RecoveryPolicy::AutoReset,
++                        recovery_policy == crate::recovery::RecoveryPolicy::AutoReset
++                            || (stored_hash == output_reset_in_progress_hash(current_hash)
++                                && !self.base.config.enable_bootstrap
++                                && !require_complete),
 +                        "Query '{}' has an incomplete durable bootstrap; explicit AutoReset is required",
 +                        self.base.config.id
 +                    );
                      info!(
                          "Query '{}' found incomplete AutoReset marker, finishing output and index wipe",
                          self.base.config.id
-@@ -2065,7 +2205,6 @@ impl Query for DrasiQuery {
+@@ -2065,7 +2366,6 @@ impl Query for DrasiQuery {
                      if let Err(e) = rebuild_output_and_indexes_in_open_session(
                          &self.base.config.id,
                          current_hash,
@@ -5553,7 +6044,7 @@ index 3d6628e35edca8f4c2dd977101c60b4540ea6b91..9086014ba70e0f864ff883b47b98fdf3
                          plan,
                          &self.output_state,
                          &stores,
-@@ -2085,7 +2224,7 @@ impl Query for DrasiQuery {
+@@ -2085,7 +2385,7 @@ impl Query for DrasiQuery {
                      }
                      false
                  }
@@ -5562,7 +6053,7 @@ index 3d6628e35edca8f4c2dd977101c60b4540ea6b91..9086014ba70e0f864ff883b47b98fdf3
                      info!(
                          "Query '{}' config hash changed ({stored_hash} -> {current_hash}), clearing all persistent state for full bootstrap",
                          self.base.config.id
-@@ -2113,7 +2252,6 @@ impl Query for DrasiQuery {
+@@ -2113,7 +2413,6 @@ impl Query for DrasiQuery {
                      if let Err(e) = rebuild_output_and_indexes_in_open_session(
                          &self.base.config.id,
                          current_hash,
@@ -5570,7 +6061,7 @@ index 3d6628e35edca8f4c2dd977101c60b4540ea6b91..9086014ba70e0f864ff883b47b98fdf3
                          plan,
                          &self.output_state,
                          &stores,
-@@ -2133,7 +2271,7 @@ impl Query for DrasiQuery {
+@@ -2133,7 +2432,7 @@ impl Query for DrasiQuery {
                      }
                      false
                  }
@@ -5579,7 +6070,7 @@ index 3d6628e35edca8f4c2dd977101c60b4540ea6b91..9086014ba70e0f864ff883b47b98fdf3
                      info!(
                          "Query '{}' no stored config hash (first run), writing hash {current_hash}",
                          self.base.config.id
-@@ -2180,7 +2318,6 @@ impl Query for DrasiQuery {
+@@ -2180,7 +2479,6 @@ impl Query for DrasiQuery {
                          if let Err(e) = rebuild_output_and_indexes_in_open_session(
                              &self.base.config.id,
                              current_hash,
@@ -5587,7 +6078,7 @@ index 3d6628e35edca8f4c2dd977101c60b4540ea6b91..9086014ba70e0f864ff883b47b98fdf3
                              plan,
                              &self.output_state,
                              &stores,
-@@ -2232,52 +2369,23 @@ impl Query for DrasiQuery {
+@@ -2232,52 +2530,23 @@ impl Query for DrasiQuery {
                      }
                      false
                  }
@@ -5599,10 +6090,18 @@ index 3d6628e35edca8f4c2dd977101c60b4540ea6b91..9086014ba70e0f864ff883b47b98fdf3
                          self.base.config.id
                      );
 -                    let plan = match plan_output_generation(
--                        &self.output_state,
--                        &stores,
++                    let plan =
++                        plan_output_generation(&self.output_state, &stores, &self.base.config.id)
++                            .await?;
++                    rebuild_output_and_indexes_in_open_session(
++                        &self.base.config.id,
++                        current_hash,
++                        plan,
+                         &self.output_state,
+                         &stores,
 -                        &self.base.config.id,
--                    )
++                        index_handles,
+                     )
 -                    .await
 -                    {
 -                        Ok(plan) => plan,
@@ -5619,18 +6118,14 @@ index 3d6628e35edca8f4c2dd977101c60b4540ea6b91..9086014ba70e0f864ff883b47b98fdf3
 -                        }
 -                    };
 -                    if let Err(re) = rebuild_output_and_indexes_in_open_session(
-+                    let plan =
-+                        plan_output_generation(&self.output_state, &stores, &self.base.config.id)
-+                            .await?;
-+                    rebuild_output_and_indexes_in_open_session(
-                         &self.base.config.id,
-                         current_hash,
+-                        &self.base.config.id,
+-                        current_hash,
 -                        self.base.config.enable_bootstrap,
-                         plan,
-                         &self.output_state,
-                         &stores,
-                         index_handles,
-                     )
+-                        plan,
+-                        &self.output_state,
+-                        &stores,
+-                        index_handles,
+-                    )
 -                    .await
 -                    {
 -                        let msg = format!(
@@ -5647,7 +6142,7 @@ index 3d6628e35edca8f4c2dd977101c60b4540ea6b91..9086014ba70e0f864ff883b47b98fdf3
                      false
                  }
              };
-@@ -2285,12 +2393,27 @@ impl Query for DrasiQuery {
+@@ -2285,12 +2554,27 @@ impl Query for DrasiQuery {
              // Only hydrate and resume checkpoints when the config hash matched.
              // A mismatch (or first run) starts at sequence 0 against empty output.
              hydrate_output = config_matches;
@@ -5675,7 +6170,7 @@ index 3d6628e35edca8f4c2dd977101c60b4540ea6b91..9086014ba70e0f864ff883b47b98fdf3
                          for settings in &mut subscription_settings {
                              if let Some(cp) = checkpoints.get(&settings.source_id) {
                                  checkpoint_sequences_per_source
-@@ -2305,7 +2428,7 @@ impl Query for DrasiQuery {
+@@ -2305,7 +2589,7 @@ impl Query for DrasiQuery {
                                      self.base.config.id, settings.source_id, cp.sequence
                                  );
                              } else if !settings.enable_bootstrap
@@ -5684,15 +6179,18 @@ index 3d6628e35edca8f4c2dd977101c60b4540ea6b91..9086014ba70e0f864ff883b47b98fdf3
                              {
                                  // Streaming-only query: no checkpoint means replay
                                  // WAL from seq 0. Bootstrap-enabled queries stay
-@@ -2316,8 +2439,16 @@ impl Query for DrasiQuery {
+@@ -2316,8 +2600,19 @@ impl Query for DrasiQuery {
                          }
                      }
                      Err(e) => {
 -                        if self.base.config.enable_bootstrap {
 -                            anyhow::bail!("Failed to read bootstrap checkpoints; refusing to process against existing indexes: {e}");
-+                        if existing_only || self.base.config.enable_bootstrap {
++                        if require_complete
++                            || self.base.config.enable_bootstrap
++                            || bootstrap_recovery == BootstrapRecovery::Published
++                        {
 +                            let msg = format!(
-+                                "Query '{}' failed to read checkpoints (ExistingOnly policy): {e}",
++                                "Query '{}' failed to read required recovery checkpoints: {e}",
 +                                self.base.config.id
 +                            );
 +                            error!("{msg}");
@@ -5703,7 +6201,7 @@ index 3d6628e35edca8f4c2dd977101c60b4540ea6b91..9086014ba70e0f864ff883b47b98fdf3
                          }
                          warn!(
                              "Query '{}' failed to read checkpoints, starting fresh: {e}",
-@@ -2339,7 +2470,7 @@ impl Query for DrasiQuery {
+@@ -2339,7 +2634,7 @@ impl Query for DrasiQuery {
                  session
                      .commit()
                      .await
@@ -5712,7 +6210,7 @@ index 3d6628e35edca8f4c2dd977101c60b4540ea6b91..9086014ba70e0f864ff883b47b98fdf3
              }
          }
  
-@@ -2351,7 +2482,10 @@ impl Query for DrasiQuery {
+@@ -2351,7 +2646,10 @@ impl Query for DrasiQuery {
                  let state = self.output_state.read().await;
                  (state.initialized(), state.outbox_capacity())
              };
@@ -5724,7 +6222,7 @@ index 3d6628e35edca8f4c2dd977101c60b4540ea6b91..9086014ba70e0f864ff883b47b98fdf3
                  // Same-process stop/start retains in-memory output, including a
                  // seq-0 snapshot populated by bootstrap. A new process constructs
                  // an uninitialized QueryOutputState and takes the hydrate path.
-@@ -2362,6 +2496,7 @@ impl Query for DrasiQuery {
+@@ -2362,6 +2660,7 @@ impl Query for DrasiQuery {
                  );
              } else {
                  let stores = DurableOutputStores {
@@ -5732,7 +6230,7 @@ index 3d6628e35edca8f4c2dd977101c60b4540ea6b91..9086014ba70e0f864ff883b47b98fdf3
                      checkpoint_store: checkpoint_store.clone(),
                      outbox_writer: self.outbox_writer.read().await.clone(),
                      live_results_writer: self.live_results_writer.read().await.clone(),
-@@ -2369,7 +2504,17 @@ impl Query for DrasiQuery {
+@@ -2369,7 +2668,17 @@ impl Query for DrasiQuery {
                  match load_durable_output(&self.base.config.id, &stores, outbox_capacity).await {
                      Ok((results, outbox, as_of_sequence, generation)) => {
                          let mut state = self.output_state.write().await;
@@ -5751,7 +6249,7 @@ index 3d6628e35edca8f4c2dd977101c60b4540ea6b91..9086014ba70e0f864ff883b47b98fdf3
                          let earliest = state.outbox_earliest_seq().unwrap_or(0);
                          self.output_metrics
                              .record_live_results_count(state.results_len());
-@@ -2379,7 +2524,7 @@ impl Query for DrasiQuery {
+@@ -2379,7 +2688,7 @@ impl Query for DrasiQuery {
                              state.as_of_sequence(),
                          );
                          info!(
@@ -5760,7 +6258,7 @@ index 3d6628e35edca8f4c2dd977101c60b4540ea6b91..9086014ba70e0f864ff883b47b98fdf3
                              self.base.config.id,
                              state.as_of_sequence(),
                              state.results_len(),
-@@ -2398,12 +2543,13 @@ impl Query for DrasiQuery {
+@@ -2398,12 +2707,13 @@ impl Query for DrasiQuery {
                              .await;
                          return Err(anyhow::anyhow!(msg));
                      }
@@ -5778,7 +6276,7 @@ index 3d6628e35edca8f4c2dd977101c60b4540ea6b91..9086014ba70e0f864ff883b47b98fdf3
                              );
                              error!("{msg}");
                              self.base
-@@ -2441,7 +2587,6 @@ impl Query for DrasiQuery {
+@@ -2441,7 +2751,6 @@ impl Query for DrasiQuery {
                              if let Err(e) = autoreset_rebuild_after_output_inconsistency(
                                  &self.base.config.id,
                                  current_hash,
@@ -5786,7 +6284,7 @@ index 3d6628e35edca8f4c2dd977101c60b4540ea6b91..9086014ba70e0f864ff883b47b98fdf3
                                  plan,
                                  &self.output_state,
                                  &stores,
-@@ -2466,8 +2611,8 @@ impl Query for DrasiQuery {
+@@ -2466,8 +2775,8 @@ impl Query for DrasiQuery {
                                  return Err(anyhow::anyhow!(msg));
                              }
  
@@ -5796,7 +6294,7 @@ index 3d6628e35edca8f4c2dd977101c60b4540ea6b91..9086014ba70e0f864ff883b47b98fdf3
                              for settings in &mut subscription_settings {
                                  settings.resume_from = None;
                                  settings.resume_sequence = None;
-@@ -2517,13 +2662,7 @@ impl Query for DrasiQuery {
+@@ -2517,13 +2826,7 @@ impl Query for DrasiQuery {
                  .collect::<Vec<_>>()
          );
  
@@ -5811,7 +6309,7 @@ index 3d6628e35edca8f4c2dd977101c60b4540ea6b91..9086014ba70e0f864ff883b47b98fdf3
          let mut subscription_tasks: Vec<tokio::task::JoinHandle<()>> = Vec::new();
  
          // Build list of sources to subscribe to
-@@ -2645,11 +2784,12 @@ impl Query for DrasiQuery {
+@@ -2645,11 +2948,12 @@ impl Query for DrasiQuery {
                          if let Some(source_err) = e.downcast_ref::<crate::sources::SourceError>() {
                              match source_err {
                                  crate::sources::SourceError::PositionUnavailable { .. } => {
@@ -5828,7 +6326,7 @@ index 3d6628e35edca8f4c2dd977101c60b4540ea6b91..9086014ba70e0f864ff883b47b98fdf3
                                              );
                                              error!("{msg}");
                                              // Cleanup already-spawned tasks
-@@ -2674,7 +2814,7 @@ impl Query for DrasiQuery {
+@@ -2674,7 +2978,7 @@ impl Query for DrasiQuery {
                                                  .set_status(ComponentStatus::Error, Some(msg))
                                                  .await;
                                              return Err(e.context(format!(
@@ -5837,15 +6335,15 @@ index 3d6628e35edca8f4c2dd977101c60b4540ea6b91..9086014ba70e0f864ff883b47b98fdf3
                                              )));
                                          }
                                          crate::recovery::RecoveryPolicy::AutoReset => {
-@@ -2753,6 +2893,7 @@ impl Query for DrasiQuery {
+@@ -2753,6 +3057,7 @@ impl Query for DrasiQuery {
                                                  let current_hash =
                                                      super::compute_config_hash(&self.base.config);
                                                  let stores = DurableOutputStores {
-+                                                    bootstrap: BootstrapRecovery::NotRequired,
++                                                    bootstrap: bootstrap_recovery,
                                                      checkpoint_store: checkpoint_store.clone(),
                                                      outbox_writer: self
                                                          .outbox_writer
-@@ -2794,7 +2935,6 @@ impl Query for DrasiQuery {
+@@ -2794,7 +3099,6 @@ impl Query for DrasiQuery {
                                                      autoreset_rebuild_after_output_inconsistency(
                                                          &self.base.config.id,
                                                          current_hash,
@@ -5853,7 +6351,7 @@ index 3d6628e35edca8f4c2dd977101c60b4540ea6b91..9086014ba70e0f864ff883b47b98fdf3
                                                          plan,
                                                          &self.output_state,
                                                          &stores,
-@@ -2821,9 +2961,9 @@ impl Query for DrasiQuery {
+@@ -2821,9 +3125,9 @@ impl Query for DrasiQuery {
                                                          .await;
                                                      return Err(anyhow::anyhow!(msg));
                                                  }
@@ -5864,7 +6362,7 @@ index 3d6628e35edca8f4c2dd977101c60b4540ea6b91..9086014ba70e0f864ff883b47b98fdf3
                                              auto_reset_retry = true;
                                              continue 'subscribe_loop;
                                          }
-@@ -2868,7 +3008,7 @@ impl Query for DrasiQuery {
+@@ -2868,7 +3172,7 @@ impl Query for DrasiQuery {
                  // Store bootstrap channel if provided
                  // Also initialize bootstrap state only for sources that support bootstrap
                  if let Some(bootstrap_rx) = subscription_response.bootstrap_receiver {
@@ -5873,7 +6371,7 @@ index 3d6628e35edca8f4c2dd977101c60b4540ea6b91..9086014ba70e0f864ff883b47b98fdf3
                          source_id.clone(),
                          bootstrap_rx,
                          subscription_response.bootstrap_result_receiver,
-@@ -2983,405 +3123,99 @@ impl Query for DrasiQuery {
+@@ -2983,405 +3287,79 @@ impl Query for DrasiQuery {
          // Wrap continuous_query in Arc for sharing across tasks
          let continuous_query = Arc::new(continuous_query);
  
@@ -5945,6 +6443,20 @@ index 3d6628e35edca8f4c2dd977101c60b4540ea6b91..9086014ba70e0f864ff883b47b98fdf3
 -            metadata.insert(
 -                "source_count".to_string(),
 -                serde_json::json!(bootstrap_channels.len()),
+-            );
+-
+-            let control_result = QueryResult::new(
+-                self.base.config.id.clone(),
+-                0,
+-                chrono::Utc::now(),
+-                vec![],
+-                metadata,
+-            );
+-
+-            // Dispatch the control signal to all subscribed reactions
+-            self.base.dispatch_query_result(control_result).await.ok();
+-            info!(
+-                "[BOOTSTRAP] Emitted bootstrapStarted signal for query '{}'",
 +        if has_persistent_backend {
 +            anyhow::ensure!(
 +                !require_complete
@@ -5957,34 +6469,6 @@ index 3d6628e35edca8f4c2dd977101c60b4540ea6b91..9086014ba70e0f864ff883b47b98fdf3
 +                                .any(|input| &input.source_id == id)
 +                    }),
 +                "Query '{}' is missing a requested persistent bootstrap stream",
-+                self.base.config.id
-             );
--
--            let control_result = QueryResult::new(
--                self.base.config.id.clone(),
--                0,
--                chrono::Utc::now(),
--                vec![],
--                metadata,
-+            anyhow::ensure!(
-+                bootstrap_channels.is_empty() || !existing_only,
-+                "ExistingOnly cannot initialize a new bootstrap"
-             );
--
--            // Dispatch the control signal to all subscribed reactions
--            self.base.dispatch_query_result(control_result).await.ok();
--            info!(
--                "[BOOTSTRAP] Emitted bootstrapStarted signal for query '{}'",
-+            anyhow::ensure!(
-+                bootstrap_channels.iter().all(|input| {
-+                    sources_to_subscribe.iter().any(|(id, _, settings)| {
-+                        id == &input.source_id
-+                            && settings.enable_bootstrap
-+                            && settings.resume_from.is_none()
-+                            && settings.resume_sequence.is_none()
-+                    })
-+                }),
-+                "Query '{}' received an unrequested bootstrap stream",
                  self.base.config.id
              );
 -
@@ -6179,16 +6663,7 @@ index 3d6628e35edca8f4c2dd977101c60b4540ea6b91..9086014ba70e0f864ff883b47b98fdf3
 -                    instance_id = %instance_id_clone,
 -                    component_id = %query_id_clone,
 -                    component_type = "query"
-+        }
-+        let bootstrap_run = if bootstrap_channels.is_empty() && !initialize_output {
-+            None
-+        } else {
-+            if !bootstrap_channels.is_empty() {
-+                let mut metadata = HashMap::new();
-+                metadata.insert(
-+                    "control_signal".to_string(),
-+                    serde_json::json!("bootstrapStarted"),
-                 );
+-                );
 -                let supervisor_handle = tokio::spawn(
 -                    async move {
 -                        let mut pending: futures::stream::FuturesUnordered<_> =
@@ -6296,33 +6771,38 @@ index 3d6628e35edca8f4c2dd977101c60b4540ea6b91..9086014ba70e0f864ff883b47b98fdf3
 -                        info!("[BOOTSTRAP] Query '{query_id_clone}' bootstrap gate opened");
 -                    }
 -                    .instrument(span),
-+                metadata.insert(
-+                    "source_count".to_string(),
-+                    serde_json::json!(bootstrap_channels.len()),
-                 );
+-                );
 -                *self.bootstrap_supervisor.write().await =
 -                    Some((supervisor_shutdown_tx, supervisor_handle));
-+                self.base
-+                    .dispatch_query_result(QueryResult::new(
-+                        self.base.config.id.clone(),
-+                        0,
-+                        chrono::Utc::now(),
-+                        vec![],
-+                        metadata,
-+                    ))
-+                    .await?;
-             }
+-            }
 -
 -            // Store abort handles for cleanup on stop()
 -            *self.bootstrap_abort_handles.write().await = abort_handles;
 -        } else {
 -            info!(
 -                "Query '{}' no bootstrap channels, skipping bootstrap",
--                self.base.config.id
--            );
++            anyhow::ensure!(
++                bootstrap_channels.is_empty() || !existing_only,
++                "ExistingOnly cannot initialize a new bootstrap"
++            );
++            anyhow::ensure!(
++                bootstrap_channels.iter().all(|input| {
++                    sources_to_subscribe.iter().any(|(id, _, settings)| {
++                        id == &input.source_id
++                            && settings.enable_bootstrap
++                            && settings.resume_from.is_none()
++                            && settings.resume_sequence.is_none()
++                    })
++                }),
++                "Query '{}' received an unrequested bootstrap stream",
+                 self.base.config.id
+             );
 -            // No bootstrap needed — open the gate immediately
 -            let _ = bootstrap_gate_tx.send(());
--        }
+         }
++        let bootstrap_run = if bootstrap_channels.is_empty() && !initialize_output {
++            None
++        } else {
 +            Some(BootstrapRun {
 +                query_id: self.base.config.id.clone(),
 +                require_complete,
@@ -6365,7 +6845,7 @@ index 3d6628e35edca8f4c2dd977101c60b4540ea6b91..9086014ba70e0f864ff883b47b98fdf3
  
          // Spawn FutureQueueSource forwarder task (same pattern as other sources)
          {
-@@ -3415,7 +3249,6 @@ impl Query for DrasiQuery {
+@@ -3415,7 +3393,6 @@ impl Query for DrasiQuery {
          let instance_id = self.instance_id.clone();
          let reporter_for_processor = self.base.status_handle();
          let subscriptions_for_processor = self.subscription_tasks.clone();
@@ -6373,7 +6853,7 @@ index 3d6628e35edca8f4c2dd977101c60b4540ea6b91..9086014ba70e0f864ff883b47b98fdf3
          let fq_source_for_processor = Arc::clone(&future_queue_source);
          let position_handles_for_processor = position_handles;
          let outbox_writer_for_processor = self.outbox_writer.read().await.clone();
-@@ -3441,66 +3274,87 @@ impl Query for DrasiQuery {
+@@ -3441,66 +3418,96 @@ impl Query for DrasiQuery {
          );
          let handle = tokio::spawn(
              async move {
@@ -6387,15 +6867,39 @@ index 3d6628e35edca8f4c2dd977101c60b4540ea6b91..9086014ba70e0f864ff883b47b98fdf3
 -                    _ = &mut shutdown_rx => {
 -                        info!(
 -                            "Query '{query_id}' received shutdown during bootstrap wait, exiting"
--                        );
++                let bootstrapped = bootstrap_run.as_ref().is_some_and(|run| !run.inputs.is_empty());
++                if let Some(bootstrap_run) = bootstrap_run {
++                    if bootstrapped {
++                        let mut metadata = HashMap::new();
++                        metadata.insert(
++                            "control_signal".to_string(), serde_json::json!("bootstrapStarted"),
+                         );
 -                        return;
--                    }
++                        metadata.insert(
++                            "source_count".to_string(), serde_json::json!(bootstrap_run.inputs.len()),
++                        );
++                        if !dispatch_unless_stopping(
++                            &query_id,
++                            Arc::new(QueryResult::new(
++                                query_id.clone(), 0, chrono::Utc::now(), vec![], metadata,
++                            )),
++                            &base_dispatchers,
++                            &mut shutdown_rx,
++                        ).await {
++                            return;
++                        }
+                     }
 -
 -                    result = bootstrap_gate_rx => {
 -                        if result.is_err() {
 -                            for handle in subscriptions_for_processor.write().await.drain(..) {
-+                let bootstrapped = bootstrap_run.as_ref().is_some_and(|run| !run.inputs.is_empty());
-+                if let Some(bootstrap_run) = bootstrap_run {
+-                                handle.abort();
+-                                let _ = handle.await;
+-                            }
+-                            for source_id in &source_ids_for_processor {
+-                                if let Some(source) = sources_for_processor.get_source_instance(source_id).await {
+-                                    source.remove_position_handle(&query_id).await;
+-                                }
 +                    let result = std::panic::AssertUnwindSafe(
 +                        bootstrap_run.run(&mut shutdown_rx)
 +                    ).catch_unwind().await;
@@ -6409,7 +6913,7 @@ index 3d6628e35edca8f4c2dd977101c60b4540ea6b91..9086014ba70e0f864ff883b47b98fdf3
 +                                reporter_for_processor.set_status(
 +                                    ComponentStatus::Error, Some(message),
 +                                ).await;
-+                            }
+                             }
 +                            std::panic::resume_unwind(panic);
 +                        }
 +                    };
@@ -6419,16 +6923,7 @@ index 3d6628e35edca8f4c2dd977101c60b4540ea6b91..9086014ba70e0f864ff883b47b98fdf3
 +                        Err(error) => {
 +                            let message = format!("Query '{query_id}' bootstrap failed: {error:#}");
 +                            error!("{message}");
-+                            let handles: Vec<_> = subscriptions_for_processor.write().await.drain(..).collect();
-+                            for handle in handles {
-                                 handle.abort();
-                                 let _ = handle.await;
-                             }
--                            for source_id in &source_ids_for_processor {
--                                if let Some(source) = sources_for_processor.get_source_instance(source_id).await {
--                                    source.remove_position_handle(&query_id).await;
--                                }
--                            }
++                            abort_subscription_tasks(&query_id, &subscriptions_for_processor).await;
                              priority_queue.drain().await;
 +                            let _publication = publication_for_processor.lock().await;
 +                            if reporter_for_processor.get_status().await == ComponentStatus::Starting {
@@ -6494,23 +6989,70 @@ index 3d6628e35edca8f4c2dd977101c60b4540ea6b91..9086014ba70e0f864ff883b47b98fdf3
 +                    let result = Arc::new(QueryResult::new(
 +                        query_id.clone(), 0, chrono::Utc::now(), vec![], metadata,
 +                    ));
-+                    tokio::select! {
-+                        biased;
-+                        _ = &mut shutdown_rx => return,
-+                        _ = async {
-+                            for dispatcher in base_dispatchers.read().await.iter() {
-+                                if let Err(error) = dispatcher.dispatch_change(result.clone()).await {
-+                                    debug!("Query '{query_id}' bootstrap control dispatch failed: {error}");
-+                                }
-+                            }
-+                        } => {}
++                    if !dispatch_unless_stopping(
++                        &query_id, result, &base_dispatchers, &mut shutdown_rx,
++                    ).await {
++                        return;
 +                    }
 +                    let state = output_state.read().await;
 +                    output_metrics_for_processor.record_live_results_count(state.results_len());
                  }
  
                  info!("Query '{query_id}' starting priority queue event processor");
-@@ -3742,56 +3596,52 @@ impl Query for DrasiQuery {
+@@ -3510,7 +3517,7 @@ impl Query for DrasiQuery {
+                 // checkpoint sequence are filtered on replay.
+                 let mut dedup = super::SequenceDedup::new(checkpoint_sequences_per_source.clone());
+ 
+-                loop {
++                'events: loop {
+                     // Check if query is still running
+                     let current_status = reporter_for_processor.get_status().await;
+                     if !matches!(current_status, ComponentStatus::Running) {
+@@ -3594,7 +3601,7 @@ impl Query for DrasiQuery {
+                                             Ok(Some(due_result)) => {
+                                                 if !due_result.results.is_empty() {
+                                                     let profiling = crate::profiling::ProfilingMetadata::new();
+-                                                    dispatch_query_results(
++                                                    if !dispatch_query_results(
+                                                         &due_result.results,
+                                                         &due_result.source_id,
+                                                         &query_id,
+@@ -3603,8 +3610,11 @@ impl Query for DrasiQuery {
+                                                         profiling,
+                                                         &output_metrics_for_processor,
+                                                         staged_seq.take(),
++                                                        &mut shutdown_rx,
+                                                     )
+-                                                    .await;
++                                                    .await {
++                                                        break 'events;
++                                                    }
+                                                 }
+                                             }
+                                             Ok(None) => break,
+@@ -3696,7 +3706,7 @@ impl Query for DrasiQuery {
+ 
+                                             if !results.is_empty() {
+                                                 profiling.query_send_ns = Some(crate::profiling::timestamp_ns());
+-                                                dispatch_query_results(
++                                                if !dispatch_query_results(
+                                                     &results,
+                                                     &source_id,
+                                                     &query_id,
+@@ -3705,8 +3715,11 @@ impl Query for DrasiQuery {
+                                                     profiling,
+                                                     &output_metrics_for_processor,
+                                                     staged_seq.take(),
++                                                    &mut shutdown_rx,
+                                                 )
+-                                                .await;
++                                                .await {
++                                                    break 'events;
++                                                }
+                                             }
+                                         }
+                                         Err(e) => {
+@@ -3742,67 +3755,54 @@ impl Query for DrasiQuery {
  
          Ok(())
      }
@@ -6581,6 +7123,7 @@ index 3d6628e35edca8f4c2dd977101c60b4540ea6b91..9086014ba70e0f864ff883b47b98fdf3
 +            if status == ComponentStatus::Stopped {
 +                return Ok(());
              }
+-        }
 +            // Like the graph, allow same-state updates; otherwise use its transition rules.
 +            anyhow::ensure!(
 +                status == ComponentStatus::Stopping
@@ -6592,9 +7135,17 @@ index 3d6628e35edca8f4c2dd977101c60b4540ea6b91..9086014ba70e0f864ff883b47b98fdf3
 +                "Cannot stop query '{}' while it is {status:?}",
 +                self.base.config.id
 +            );
-+
+ 
+-        // Drain and abort source subscription forwarders so they don't leak across restarts
+-        let subscription_handles: Vec<_> = {
+-            let mut tasks = self.subscription_tasks.write().await;
+-            tasks.drain(..).collect()
+-        };
 +            log_component_stop("Query", &self.base.config.id);
-+
+ 
+-        for handle in subscription_handles {
+-            handle.abort();
+-            let _ = handle.await;
 +            // Error is not a quiescent state: failed queries need the same resource
 +            // cleanup as running queries before they can report Stopped.
 +            self.base
@@ -6605,10 +7156,12 @@ index 3d6628e35edca8f4c2dd977101c60b4540ea6b91..9086014ba70e0f864ff883b47b98fdf3
 +                .await;
          }
 +        self.base.stop_task().await?;
++
++        abort_subscription_tasks(&self.base.config.id, &self.subscription_tasks).await;
  
-         // Drain and abort source subscription forwarders so they don't leak across restarts
-         let subscription_handles: Vec<_> = {
-@@ -3826,16 +3676,9 @@ impl Query for DrasiQuery {
+         // Stop the FutureQueueSource polling task
+         if let Some(fq) = self.future_queue_source.write().await.take() {
+@@ -3826,16 +3826,9 @@ impl Query for DrasiQuery {
          // Clear tracked source IDs
          self.subscribed_source_ids.write().await.clear();
  
@@ -6626,7 +7179,7 @@ index 3d6628e35edca8f4c2dd977101c60b4540ea6b91..9086014ba70e0f864ff883b47b98fdf3
          Ok(())
      }
  
-@@ -3953,6 +3796,24 @@ impl Query for DrasiQuery {
+@@ -3953,6 +3946,24 @@ impl Query for DrasiQuery {
          *self.outbox_writer.write().await = None;
          *self.live_results_writer.write().await = None;
      }
@@ -6651,7 +7204,7 @@ index 3d6628e35edca8f4c2dd977101c60b4540ea6b91..9086014ba70e0f864ff883b47b98fdf3
  }
  
  pub struct QueryManager {
-@@ -3971,6 +3832,7 @@ pub struct QueryManager {
+@@ -3971,6 +3982,7 @@ pub struct QueryManager {
      /// Global default recovery policy. Per-query overrides this; if neither is set,
      /// defaults to `Strict`.
      default_recovery_policy: Option<crate::recovery::RecoveryPolicy>,
@@ -6659,7 +7212,7 @@ index 3d6628e35edca8f4c2dd977101c60b4540ea6b91..9086014ba70e0f864ff883b47b98fdf3
      /// Cached query labels extracted at registration time to avoid re-parsing
      /// queries on every `get_graph_schema()` call.
      label_cache: RwLock<HashMap<String, QueryLabels>>,
-@@ -3996,10 +3858,16 @@ impl QueryManager {
+@@ -3996,10 +4008,16 @@ impl QueryManager {
              graph,
              update_tx,
              default_recovery_policy,
@@ -6676,7 +7229,7 @@ index 3d6628e35edca8f4c2dd977101c60b4540ea6b91..9086014ba70e0f864ff883b47b98fdf3
      /// Register and provision a new query from the given configuration.
      ///
      /// # Errors
-@@ -4066,7 +3934,8 @@ impl QueryManager {
+@@ -4066,7 +4084,8 @@ impl QueryManager {
              self.index_factory.clone(),
              self.middleware_registry.clone(),
              self.default_recovery_policy,
@@ -6686,7 +7239,7 @@ index 3d6628e35edca8f4c2dd977101c60b4540ea6b91..9086014ba70e0f864ff883b47b98fdf3
  
          // Wire status handle to graph via context (same pattern as Source/Reaction)
          let context = crate::context::QueryRuntimeContext::new(
-@@ -4113,6 +3982,24 @@ impl QueryManager {
+@@ -4113,6 +4132,24 @@ impl QueryManager {
          crate::managers::lifecycle_helpers::start_component(&self.graph, &id, "query", &query).await
      }
  
@@ -6711,7 +7264,7 @@ index 3d6628e35edca8f4c2dd977101c60b4540ea6b91..9086014ba70e0f864ff883b47b98fdf3
      /// Stop a running, starting, or failed query by ID, releasing its active
      /// subscriptions and processing tasks.
      ///
-@@ -4327,6 +4214,7 @@ impl QueryManager {
+@@ -4327,6 +4364,7 @@ impl QueryManager {
                                  format!("Query '{id}' failed to clear checkpoints on removal")
                              })?;
                          let stores = DurableOutputStores {
@@ -6719,7 +7272,7 @@ index 3d6628e35edca8f4c2dd977101c60b4540ea6b91..9086014ba70e0f864ff883b47b98fdf3
                              checkpoint_store: checkpoint_store.clone(),
                              outbox_writer: created.outbox_writer.clone(),
                              live_results_writer: created.live_results_writer.clone(),
-@@ -4368,6 +4256,62 @@ impl QueryManager {
+@@ -4368,6 +4406,62 @@ impl QueryManager {
          Ok(())
      }
  
@@ -6782,7 +7335,7 @@ index 3d6628e35edca8f4c2dd977101c60b4540ea6b91..9086014ba70e0f864ff883b47b98fdf3
      /// Release persistent index-backend handles for every query runtime, without
      /// deleting any on-disk data.
      ///
-@@ -4484,7 +4428,7 @@ impl QueryManager {
+@@ -4484,7 +4578,7 @@ impl QueryManager {
          .await
      }
  
@@ -6791,7 +7344,7 @@ index 3d6628e35edca8f4c2dd977101c60b4540ea6b91..9086014ba70e0f864ff883b47b98fdf3
      ///
      /// # Errors
      /// Returns an error listing any queries that failed to stop.
-@@ -4505,7 +4449,10 @@ impl QueryManager {
+@@ -4505,7 +4599,10 @@ impl QueryManager {
                  let graph = self.graph.read().await;
                  graph
                      .get_component(&id)

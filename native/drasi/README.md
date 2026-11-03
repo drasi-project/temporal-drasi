@@ -257,10 +257,12 @@ The prerequisite change is proposed upstream in
 that proposal does not make this local pin a trusted-main publication.
 
 `build.sh` and `verify.sh` run `prepare-core.py`. It checks the complete patch's
-SHA256 `42d598f0ea404d5de81b605651968953a6d6d3e2bc3ae45fcdb73031e9cf2813`,
+SHA256 `b16241b0d77acb9a2c3922c7ff16ed96d55279e66574ac8593174f1bd2ebce47`,
 fetches only the pinned public base into an isolated ignored checkout, and checks
 the complete patched Git tree
-`198a2fbe0e9eb5f819d4ac5cce5622252d6ffe72`. Cargo overrides use only
+`029e8390bfc0a6e426ace96012593e743b068f65`. This includes the reviewed
+cancellation, retained-publication, interrupted-reset and checkpoint-admission
+corrections without changing the SDK/ABI family or upstream lock. Cargo overrides use only
 repository-relative paths in a cache keyed by that tree; old verified trees
 remain untouched when the pin changes. No companion worktree
 or shared Cargo cache is modified. Preparation is serialized and publishes the
@@ -285,6 +287,10 @@ The four earlier overlay patches and frozen tree
 `7bf4530999d24a435db70a6ac6e07c27b26253ac` are retained as historical development
 artifacts, not applied to the new base. Their SDK 0.11.3/ABI 0.14 proofs and
 packages do not verify the current family. The old source cache is not modified.
+The initial SDK 0.12 candidate tree
+`198a2fbe0e9eb5f819d4ac5cce5622252d6ffe72` is also retained in its separate
+cache and Git history. Its evidence does not substitute for verifying the
+reviewed tree, despite their identical package versions.
 
 The verifier also runs the prepared SDK's recovery, durable bootstrap, and
 preserving-removal tests plus SDK Clippy in a disposable checkout:

@@ -192,7 +192,7 @@ func chasmOutputPackages(encoded []byte) (map[string]string, error) {
 		if !strings.HasPrefix(file.GetName(), "chasm/lib/") {
 			continue
 		}
-		option := strings.SplitN(file.GetOptions().GetGoPackage(), ";", 2)[0]
+		option, _, _ := strings.Cut(file.GetOptions().GetGoPackage(), ";")
 		if !strings.HasPrefix(option, "go.temporal.io/server/chasm/lib/") {
 			return nil, fmt.Errorf("CHASM proto %s requires a server-local go_package", file.GetName())
 		}

@@ -11,9 +11,9 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent
 BASE = "9469f3e01ff22c4f0092c9900dfbd5051ceae545"
 PATCHES = (
-    ("drasi-core-current-main-prerequisites.patch", "42d598f0ea404d5de81b605651968953a6d6d3e2bc3ae45fcdb73031e9cf2813"),
+    ("drasi-core-current-main-prerequisites.patch", "b16241b0d77acb9a2c3922c7ff16ed96d55279e66574ac8593174f1bd2ebce47"),
 )
-TREE = "198a2fbe0e9eb5f819d4ac5cce5622252d6ffe72"
+TREE = "029e8390bfc0a6e426ace96012593e743b068f65"
 SOURCE = ROOT / ".upstream" / f"drasi-core-{TREE}"
 
 

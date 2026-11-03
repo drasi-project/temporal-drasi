@@ -288,7 +288,7 @@ func TestControlRuntimeMutationFencesDelayedPreviousOwner(t *testing.T) {
 		t.Run(mutation, func(t *testing.T) {
 			t.Parallel()
 			env, h, create := newHandlerTestEnvironment(t)
-			for previous := uint64(0); previous < 2; previous++ {
+			for previous := range uint64(2) {
 				_, err := h.MutateExecution(env.ctx, &watchpb.MutateExecutionRequest{
 					NamespaceId: create.NamespaceId, ExecutionId: create.ExecutionId,
 					ExpectedRevision: 1, OwnerEpoch: previous,

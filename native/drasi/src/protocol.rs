@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 
 pub const VERSION: u32 = 1;
 pub const UPSTREAM: &str =
-    "9469f3e01ff22c4f0092c9900dfbd5051ceae545+development.198a2fbe0e9eb5f819d4ac5cce5622252d6ffe72";
+    "9469f3e01ff22c4f0092c9900dfbd5051ceae545+development.029e8390bfc0a6e426ace96012593e743b068f65";
 pub const MAX_INPUT: usize = 1 << 20;
 pub const MAX_OUTPUT: usize = 16 << 20;
 
