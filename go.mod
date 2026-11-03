@@ -21,6 +21,8 @@ require (
 	github.com/cactus/go-statsd-client/v5 v5.1.0
 	github.com/caio/go-tdigest/v5 v5.0.0
 	github.com/dgryski/go-farm v0.0.0-20240924180020-3414d57e47da
+	github.com/drasi-project/temporal-drasi/contracts/watch v0.0.0
+	github.com/drasi-project/temporal-drasi/sdk/go v0.0.0
 	github.com/emirpasic/gods v1.18.1
 	github.com/fatih/color v1.19.0
 	github.com/felixge/httpsnoop v1.0.4
@@ -29,6 +31,7 @@ require (
 	github.com/go-sql-driver/mysql v1.9.3
 	github.com/gocql/gocql v1.7.0
 	github.com/golang-jwt/jwt/v4 v4.5.2
+	github.com/golang/mock v1.6.0
 	github.com/google/go-cmp v0.7.0
 	github.com/google/uuid v1.6.0
 	github.com/gorilla/mux v1.8.1
@@ -140,8 +143,6 @@ require (
 	github.com/cncf/xds/go v0.0.0-20260202195803-dba9d589def2 // indirect
 	github.com/cpuguy83/go-md2man/v2 v2.0.7 // indirect
 	github.com/davecgh/go-spew v1.1.2-0.20180830191138-d8f796af33cc // indirect
-	github.com/drasi-project/temporal-drasi/contracts/watch v0.0.0
-	github.com/drasi-project/temporal-drasi/sdk/go v0.0.0
 	github.com/dustin/go-humanize v1.0.1 // indirect
 	github.com/emicklei/go-restful/v3 v3.13.0 // indirect
 	github.com/envoyproxy/go-control-plane/envoy v1.37.0 // indirect
@@ -153,7 +154,6 @@ require (
 	github.com/go-openapi/jsonreference v0.21.5 // indirect
 	github.com/go-openapi/swag v0.27.1 // indirect
 	github.com/gogo/protobuf v1.3.2 // indirect
-	github.com/golang/mock v1.6.0 // indirect
 	github.com/golang/snappy v1.0.0 // indirect
 	github.com/google/gnostic-models v0.7.1 // indirect
 	github.com/google/s2a-go v0.1.9 // indirect
