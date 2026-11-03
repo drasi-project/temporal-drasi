@@ -56,6 +56,8 @@ import (
 	"go.temporal.io/server/service/history/replication"
 	"go.temporal.io/server/service/history/tasks"
 	"go.temporal.io/server/service/matching"
+	"go.temporal.io/server/service/watch"
+	"go.temporal.io/server/service/watch/native"
 	"go.temporal.io/server/service/worker"
 	"go.uber.org/fx"
 	"go.uber.org/fx/fxevent"
@@ -144,6 +146,7 @@ var (
 			FrontendServiceProvider,
 			InternalFrontendServiceProvider,
 			WorkerServiceProvider,
+			WatchServiceProvider,
 			ApplyClusterMetadataConfigProvider,
 		),
 		dynamicconfig.Module,
@@ -481,11 +484,17 @@ func (params ServiceProviderParamsCommon) GetCommonServiceOptions(serviceName pr
 // it, we also do validation on request task categories in the frontend service. As a result, we need to initialize the
 // registry in the server graph, and then propagate it to the service graphs. Otherwise, it would be isolated to the
 // history service's graph.
-func TaskCategoryRegistryProvider(archivalMetadata archiver.ArchivalMetadata) tasks.TaskCategoryRegistry {
+func TaskCategoryRegistryProvider(
+	archivalMetadata archiver.ArchivalMetadata,
+	dc *dynamicconfig.Collection,
+) tasks.TaskCategoryRegistry {
 	registry := tasks.NewDefaultTaskCategoryRegistry()
 	if archivalMetadata.GetHistoryConfig().StaticClusterState() == archiver.ArchivalEnabled ||
 		archivalMetadata.GetVisibilityConfig().StaticClusterState() == archiver.ArchivalEnabled {
 		registry.AddCategory(tasks.CategoryArchival)
+	}
+	if dynamicconfig.EnableExecutionFeedQueue.Get(dc)() {
+		registry.AddCategory(tasks.CategoryExecutionFeed)
 	}
 	return registry
 }
@@ -602,6 +611,26 @@ func WorkerServiceProvider(
 		worker.Module,
 	)
 
+	return NewService(app, serviceName, params.Logger), app.Err()
+}
+
+func WatchServiceProvider(params ServiceProviderParamsCommon, options *serverOptions) (ServicesGroupOut, error) {
+	serviceName := primitives.WatchService
+	if _, ok := params.ServiceNames[serviceName]; !ok {
+		params.Logger.Info("Service is not requested, skipping initialization.", tag.Service(serviceName))
+		return ServicesGroupOut{}, nil
+	}
+	if !native.Enabled() {
+		return ServicesGroupOut{}, native.ErrDisabled
+	}
+	app := fx.New(
+		params.GetCommonServiceOptions(serviceName),
+		fx.Provide(
+			func() *watch.PluginPolicy { return options.drasiPluginPolicy },
+			func() watch.CredentialReader { return options.drasiCredentials },
+		),
+		watch.Module,
+	)
 	return NewService(app, serviceName, params.Logger), app.Err()
 }
 

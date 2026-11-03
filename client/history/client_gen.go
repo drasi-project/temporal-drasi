@@ -30,6 +30,26 @@ func (c *clientImpl) AddTasks(
 	return response, nil
 }
 
+func (c *clientImpl) BootstrapExecutionFeed(
+	ctx context.Context,
+	request *historyservice.BootstrapExecutionFeedRequest,
+	opts ...grpc.CallOption,
+) (*historyservice.BootstrapExecutionFeedResponse, error) {
+	shardID := request.GetShardId()
+	var response *historyservice.BootstrapExecutionFeedResponse
+	op := func(ctx context.Context, client historyservice.HistoryServiceClient) error {
+		var err error
+		ctx, cancel := c.createContext(ctx)
+		defer cancel()
+		response, err = client.BootstrapExecutionFeed(ctx, request, opts...)
+		return err
+	}
+	if err := c.executeWithRedirect(ctx, shardID, op); err != nil {
+		return nil, err
+	}
+	return response, nil
+}
+
 func (c *clientImpl) CancelNexusOperation(
 	ctx context.Context,
 	request *historyservice.CancelNexusOperationRequest,
@@ -351,6 +371,26 @@ func (c *clientImpl) GetDLQTasks(
 		ctx, cancel := c.createContext(ctx)
 		defer cancel()
 		response, err = client.GetDLQTasks(ctx, request, opts...)
+		return err
+	}
+	if err := c.executeWithRedirect(ctx, shardID, op); err != nil {
+		return nil, err
+	}
+	return response, nil
+}
+
+func (c *clientImpl) GetExecutionFeed(
+	ctx context.Context,
+	request *historyservice.GetExecutionFeedRequest,
+	opts ...grpc.CallOption,
+) (*historyservice.GetExecutionFeedResponse, error) {
+	shardID := request.GetShardId()
+	var response *historyservice.GetExecutionFeedResponse
+	op := func(ctx context.Context, client historyservice.HistoryServiceClient) error {
+		var err error
+		ctx, cancel := c.createContext(ctx)
+		defer cancel()
+		response, err = client.GetExecutionFeed(ctx, request, opts...)
 		return err
 	}
 	if err := c.executeWithRedirect(ctx, shardID, op); err != nil {

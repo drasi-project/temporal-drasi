@@ -18,6 +18,7 @@ type RPCFactory interface {
 	CreateLocalFrontendGRPCConnection() *grpc.ClientConn
 	CreateHistoryGRPCConnection(rpcAddress string) *grpc.ClientConn
 	CreateMatchingGRPCConnection(rpcAddress string) *grpc.ClientConn
+	CreateWatchGRPCConnection(rpcAddress string) *grpc.ClientConn
 	CreateLocalFrontendHTTPClient() (*FrontendHTTPClient, error)
 }
 

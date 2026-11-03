@@ -23,6 +23,7 @@ import (
 	"go.temporal.io/server/common/rpc/encryption"
 	"go.temporal.io/server/common/searchattribute"
 	"go.temporal.io/server/common/testing/testhooks"
+	"go.temporal.io/server/service/watch"
 	"google.golang.org/grpc"
 )
 
@@ -60,6 +61,8 @@ type (
 		clientFactoryProvider           client.FactoryProvider
 		persistenceFactoryProvider      persistenceClient.FactoryProviderFn
 		searchAttributesMapper          searchattribute.Mapper
+		drasiPluginPolicy               *watch.PluginPolicy
+		drasiCredentials                watch.CredentialReader
 		customFrontendInterceptors      []grpc.UnaryServerInterceptor
 		additionalStreamInterceptors    []grpc.StreamServerInterceptor
 		metricHandler                   metrics.Handler

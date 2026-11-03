@@ -1,0 +1,30 @@
+{
+  "google/api/annotations.proto": {
+    "sha256": "e79ea741cb605a65e78ca322174764a4af9fde1962c1631e12b84c4934ba9a6c",
+    "url": "https://raw.githubusercontent.com/googleapis/googleapis/6efda153a78866d02076d7fd9e463089d4ccf3fd/google/api/annotations.proto"
+  },
+  "google/api/http.proto": {
+    "sha256": "ead99129aa15dd5f6233942030c72eec33bc0d7b1c7c260dc143293ef66c5b78",
+    "url": "https://raw.githubusercontent.com/googleapis/googleapis/6efda153a78866d02076d7fd9e463089d4ccf3fd/google/api/http.proto"
+  },
+  "temporal/api/common/v1/message.proto": {
+    "sha256": "995d5c4c27a7e669fb16f53c27d38fcfa9058f5fb5e52aeeae1e87bbfb308a5c",
+    "url": "https://raw.githubusercontent.com/temporalio/api/9156239c8272003b6f228951602ca2b130a55876/temporal/api/common/v1/message.proto"
+  },
+  "temporal/api/enums/v1/common.proto": {
+    "sha256": "11ed97e08d4e9a9466c6286cb5cb6878541a338addc1e7e7b3e901aa1e81877e",
+    "url": "https://raw.githubusercontent.com/temporalio/api/9156239c8272003b6f228951602ca2b130a55876/temporal/api/enums/v1/common.proto"
+  },
+  "temporal/api/enums/v1/event_type.proto": {
+    "sha256": "6993f34e6d0b6c53e00500a00029378567dbfef6f1634ab3603e6b6d88e6cb04",
+    "url": "https://raw.githubusercontent.com/temporalio/api/9156239c8272003b6f228951602ca2b130a55876/temporal/api/enums/v1/event_type.proto"
+  },
+  "temporal/api/enums/v1/reset.proto": {
+    "sha256": "8de2b1f06278c9adaf0ab5c96be5a77fe82a53f1a63a38c9f4d4bcc1d1a1e122",
+    "url": "https://raw.githubusercontent.com/temporalio/api/9156239c8272003b6f228951602ca2b130a55876/temporal/api/enums/v1/reset.proto"
+  },
+  "temporal/api/enums/v1/workflow.proto": {
+    "sha256": "813fed41d83836f7b7ca0376959da36b7b2d8062cb010a5fbc26faca307fa3c1",
+    "url": "https://raw.githubusercontent.com/temporalio/api/9156239c8272003b6f228951602ca2b130a55876/temporal/api/enums/v1/workflow.proto"
+  }
+}

@@ -112,6 +112,20 @@ func (mr *MockRPCFactoryMockRecorder) CreateRemoteFrontendGRPCConnection(rpcAddr
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "CreateRemoteFrontendGRPCConnection", reflect.TypeOf((*MockRPCFactory)(nil).CreateRemoteFrontendGRPCConnection), rpcAddress)
 }
 
+// CreateWatchGRPCConnection mocks base method.
+func (m *MockRPCFactory) CreateWatchGRPCConnection(rpcAddress string) *grpc.ClientConn {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "CreateWatchGRPCConnection", rpcAddress)
+	ret0, _ := ret[0].(*grpc.ClientConn)
+	return ret0
+}
+
+// CreateWatchGRPCConnection indicates an expected call of CreateWatchGRPCConnection.
+func (mr *MockRPCFactoryMockRecorder) CreateWatchGRPCConnection(rpcAddress any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "CreateWatchGRPCConnection", reflect.TypeOf((*MockRPCFactory)(nil).CreateWatchGRPCConnection), rpcAddress)
+}
+
 // GetFrontendGRPCServerOptions mocks base method.
 func (m *MockRPCFactory) GetFrontendGRPCServerOptions() ([]grpc.ServerOption, error) {
 	m.ctrl.T.Helper()

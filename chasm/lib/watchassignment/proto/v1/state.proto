@@ -1,0 +1,65 @@
+syntax = "proto3";
+
+package temporal.server.chasm.watchassignment.v1;
+
+option go_package = "go.temporal.io/server/chasm/lib/watchassignment/gen/assignmentpb/v1;assignmentpb";
+
+// Grant identifies one cooperative native owner, not a physical storage fence.
+message Grant {
+  // Namespace ID scopes the assignment.
+  string namespace_id = 1;
+  // Instance ID remains stable across owner epochs.
+  string instance_id = 2;
+  // Storage host ID identifies the same host and persistent volume.
+  string storage_host_id = 3;
+  // Process boot ID distinguishes successive processes on that host.
+  string process_boot_id = 4;
+  // Epoch increases only after the previous owner seals its state.
+  uint64 epoch = 5;
+}
+
+// Cut locates a closed native checkpoint on the assignment's storage host.
+message Cut {
+  // Directory is an absolute local path, not a transport or download URL.
+  string directory = 1;
+  // Manifest SHA256 binds the exact checkpoint-v1.json bytes.
+  string manifest_sha256 = 2;
+  // Instance ID must match the closing grant.
+  string instance_id = 3;
+  // Owner epoch must match the closing grant.
+  uint64 owner_epoch = 4;
+}
+
+message Active {
+  // Grant is the current non-expiring assignment.
+  Grant grant = 1;
+  // Request ID identifies the accepted Begin operation.
+  string request_id = 2;
+  // Fingerprint detects changed content on a Begin retry.
+  bytes fingerprint = 3;
+  // Recovery cut is absent only for the first owner.
+  Cut recovery_cut = 4;
+}
+
+message Sealed {
+  // Predecessor retains the closed grant and its Begin receipt.
+  Active predecessor = 1;
+  // Request ID identifies the accepted Seal operation.
+  string request_id = 2;
+  // Fingerprint detects changed content on a Seal retry.
+  bytes fingerprint = 3;
+  // Checkpoint is the exact successor recovery cut.
+  Cut checkpoint = 4;
+}
+
+// State has no expiry, health-based transition, or force-clear operation.
+message State {
+  // Version fences mutations independently of the owner epoch.
+  uint64 version = 1;
+  oneof phase {
+    // Active refuses every competing Begin.
+    Active active = 2;
+    // Sealed permits a successor on the same storage host.
+    Sealed sealed = 3;
+  }
+}

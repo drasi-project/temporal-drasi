@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net"
 
+	contractpb "github.com/drasi-project/temporal-drasi/contracts/watch/v1"
 	"github.com/gorilla/mux"
 	otellog "go.opentelemetry.io/otel/log"
 	"go.temporal.io/api/serviceerror"
@@ -18,6 +19,7 @@ import (
 	chasmscheduler "go.temporal.io/server/chasm/lib/scheduler"
 	"go.temporal.io/server/chasm/lib/scheduler/gen/schedulerpb/v1"
 	chasmtests "go.temporal.io/server/chasm/lib/tests"
+	"go.temporal.io/server/chasm/lib/watchregistry"
 	chasmworkflow "go.temporal.io/server/chasm/lib/workflow"
 	"go.temporal.io/server/client"
 	"go.temporal.io/server/common"
@@ -165,6 +167,7 @@ var Module = fx.Options(
 	chasmcallback.Module,
 	namespacereplication.Module,
 	activity.FrontendModule,
+	watchregistry.FrontendModule,
 	fx.Provide(visibility.ChasmVisibilityManagerProvider),
 	fx.Provide(chasm.ChasmVisibilityInterceptorProvider),
 )
@@ -1146,6 +1149,8 @@ func HTTPAPIServerProvider(
 	namespaceRegistry namespace.Registry,
 	logger log.Logger,
 	router *mux.Router,
+	watches contractpb.WatchServiceServer,
+	plugins contractpb.PluginServiceServer,
 ) (*HTTPAPIServer, error) {
 	if !httpEnabled(cfg, serviceName) {
 		return nil, nil
@@ -1163,6 +1168,8 @@ func HTTPAPIServerProvider(
 		router,
 		namespaceRegistry,
 		logger,
+		watches,
+		plugins,
 	)
 }
 

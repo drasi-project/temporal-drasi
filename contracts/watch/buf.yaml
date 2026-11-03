@@ -1,0 +1,10 @@
+version: v2
+modules:
+  - path: proto
+  - path: .tools/proto
+lint:
+  use:
+    - COMMENT_FIELD
+breaking:
+  use:
+    - WIRE

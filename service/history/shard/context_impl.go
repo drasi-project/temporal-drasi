@@ -13,6 +13,7 @@ import (
 	"github.com/google/uuid"
 	otellog "go.opentelemetry.io/otel/log"
 	commonpb "go.temporal.io/api/common/v1"
+	enumspb "go.temporal.io/api/enums/v1"
 	"go.temporal.io/api/serviceerror"
 	"go.temporal.io/server/api/adminservice/v1"
 	clockspb "go.temporal.io/server/api/clock/v1"
@@ -573,6 +574,10 @@ func (s *ContextImpl) CreateWorkflowExecution(
 		s.wUnlock()
 		return nil, err
 	}
+	if err := s.validateExecutionFeedCaptureLocked(namespaceID, request.NewWorkflowSnapshot.ExecutionFeedCaptureEpoch); err != nil {
+		s.wUnlock()
+		return nil, err
+	}
 
 	requestCompletionFn, err := s.taskKeyManager.setAndTrackTaskKeys(
 		request.NewWorkflowSnapshot.Tasks,
@@ -628,6 +633,14 @@ func (s *ContextImpl) UpdateWorkflowExecution(
 	}
 
 	if err := s.errorByNamespaceStateLocked(namespaceEntry.Name(), request.UpdateWorkflowMutation.ExecutionInfo.WorkflowId); err != nil {
+		s.wUnlock()
+		return nil, err
+	}
+	epochs := []int64{request.UpdateWorkflowMutation.ExecutionFeedCaptureEpoch}
+	if request.NewWorkflowSnapshot != nil {
+		epochs = append(epochs, request.NewWorkflowSnapshot.ExecutionFeedCaptureEpoch)
+	}
+	if err := s.validateExecutionFeedCaptureLocked(namespaceID, epochs...); err != nil {
 		s.wUnlock()
 		return nil, err
 	}
@@ -709,6 +722,17 @@ func (s *ContextImpl) ConflictResolveWorkflowExecution(
 		s.wUnlock()
 		return nil, err
 	}
+	epochs := []int64{request.ResetWorkflowSnapshot.ExecutionFeedCaptureEpoch}
+	if request.CurrentWorkflowMutation != nil {
+		epochs = append(epochs, request.CurrentWorkflowMutation.ExecutionFeedCaptureEpoch)
+	}
+	if request.NewWorkflowSnapshot != nil {
+		epochs = append(epochs, request.NewWorkflowSnapshot.ExecutionFeedCaptureEpoch)
+	}
+	if err := s.validateExecutionFeedCaptureLocked(namespaceID, epochs...); err != nil {
+		s.wUnlock()
+		return nil, err
+	}
 
 	taskMaps := make([]map[tasks.Category][]tasks.Task, 0, 3)
 	if request.CurrentWorkflowMutation != nil {
@@ -768,6 +792,10 @@ func (s *ContextImpl) SetWorkflowExecution(
 	}
 
 	if err := s.errorByNamespaceStateLocked(namespaceEntry.Name(), request.SetWorkflowSnapshot.ExecutionInfo.WorkflowId); err != nil {
+		s.wUnlock()
+		return nil, err
+	}
+	if err := s.validateExecutionFeedCaptureLocked(namespaceID, request.SetWorkflowSnapshot.ExecutionFeedCaptureEpoch); err != nil {
 		s.wUnlock()
 		return nil, err
 	}
@@ -942,7 +970,7 @@ func (s *ContextImpl) DeleteWorkflowExecution(
 	}
 
 	// Do not get namespace cache within shard lock.
-	_, err = s.GetNamespaceRegistry().GetNamespaceByID(namespace.ID(key.NamespaceID))
+	feedNamespace, err := s.GetNamespaceRegistry().GetNamespaceByID(namespace.ID(key.NamespaceID))
 	deleteVisibilityRecord := true
 	if err != nil {
 		if _, isNotFound := err.(*serviceerror.NamespaceNotFound); isNotFound {
@@ -1069,7 +1097,7 @@ func (s *ContextImpl) DeleteWorkflowExecution(
 					return err
 				}
 				defer cancel()
-				if err := s.GetExecutionManager().DeleteWorkflowExecution(
+				if err := s.deleteWorkflowExecutionWithFeed(
 					ctx,
 					&persistence.DeleteWorkflowExecutionRequest{
 						ShardID:     s.shardID,
@@ -1078,6 +1106,7 @@ func (s *ContextImpl) DeleteWorkflowExecution(
 						RunID:       key.RunID,
 						ArchetypeID: archetypeID,
 					},
+					feedNamespace, lastWriteVersion,
 				); err != nil {
 					return err
 				}
@@ -1163,7 +1192,12 @@ func (s *ContextImpl) generateTaskIDLocked() (int64, error) {
 	return taskKey.TaskID, nil
 }
 
-func (s *ContextImpl) renewRangeLocked(isStealing bool) error {
+func (s *ContextImpl) renewRangeLocked(isStealing bool, captureNamespace namespace.ID) error {
+	if captureNamespace != "" && s.shardInfo.ExecutionFeedCaptureEpochs[captureNamespace.String()] == 0 &&
+		len(s.shardInfo.ExecutionFeedCaptureEpochs) >= 1024 {
+		return serviceerror.NewResourceExhausted(enumspb.RESOURCE_EXHAUSTED_CAUSE_SYSTEM_OVERLOADED,
+			"execution feed capture namespace limit reached for shard")
+	}
 	// We must drain all in-flight requests before updating the rangeID.
 	// This is because requests are conditioned on rangeID, if rangeID
 	// is updated before draining them, those requests could fail.
@@ -1174,6 +1208,12 @@ func (s *ContextImpl) renewRangeLocked(isStealing bool) error {
 
 	updatedShardInfo := trimShardInfo(s.config, s.clusterMetadata.GetAllClusterInfo(), s.copyShardInfo(s.shardInfo))
 	updatedShardInfo.RangeId++
+	if captureNamespace != "" && updatedShardInfo.ExecutionFeedCaptureEpochs[captureNamespace.String()] == 0 {
+		if updatedShardInfo.ExecutionFeedCaptureEpochs == nil {
+			updatedShardInfo.ExecutionFeedCaptureEpochs = make(map[string]int64)
+		}
+		updatedShardInfo.ExecutionFeedCaptureEpochs[captureNamespace.String()] = updatedShardInfo.RangeId
+	}
 	if isStealing {
 		updatedShardInfo.StolenSinceRenew++
 	}
@@ -2078,7 +2118,7 @@ func (s *ContextImpl) acquireShard() {
 		// in-flight requests before making the call. So it's guaranteed that the renew rangeID
 		// UpdateShard call is the only one in flight.
 		s.wLock()
-		err = s.renewRangeLocked(true)
+		err = s.renewRangeLocked(true, "")
 		s.wUnlock()
 		if err != nil {
 			return err
@@ -2246,7 +2286,7 @@ func newContext(
 		historyConfig,
 		shardContext.GetLogger(),
 		func() error {
-			return shardContext.renewRangeLocked(false)
+			return shardContext.renewRangeLocked(false, "")
 		},
 	)
 	shardContext.handoverTracker = handoverTrackerFactory(HandoverTrackerParams{
@@ -2298,13 +2338,14 @@ func (s *ContextImpl) copyShardInfo(shardInfo *persistencespb.ShardInfo) *persis
 	}
 
 	return &persistencespb.ShardInfo{
-		ShardId:                shardInfo.ShardId,
-		Owner:                  shardInfo.Owner,
-		RangeId:                shardInfo.RangeId,
-		StolenSinceRenew:       shardInfo.StolenSinceRenew,
-		ReplicationDlqAckLevel: maps.Clone(shardInfo.ReplicationDlqAckLevel),
-		UpdateTime:             shardInfo.UpdateTime,
-		QueueStates:            queueStates,
+		ShardId:                    shardInfo.ShardId,
+		Owner:                      shardInfo.Owner,
+		RangeId:                    shardInfo.RangeId,
+		StolenSinceRenew:           shardInfo.StolenSinceRenew,
+		ReplicationDlqAckLevel:     maps.Clone(shardInfo.ReplicationDlqAckLevel),
+		UpdateTime:                 shardInfo.UpdateTime,
+		QueueStates:                queueStates,
+		ExecutionFeedCaptureEpochs: maps.Clone(shardInfo.ExecutionFeedCaptureEpochs),
 	}
 }
 
@@ -2404,7 +2445,17 @@ func (s *ContextImpl) GetCachedWorkflowContext(
 	execution *commonpb.WorkflowExecution,
 	lockPriority locks.Priority,
 ) (historyi.WorkflowContext, historyi.ReleaseWorkflowContextFunc, error) {
-	return nil, nil, nil
+	engine, err := s.GetEngine(ctx)
+	if err != nil {
+		return nil, nil, err
+	}
+	provider, ok := engine.(interface {
+		GetCachedWorkflowContext(context.Context, namespace.ID, *commonpb.WorkflowExecution, locks.Priority) (historyi.WorkflowContext, historyi.ReleaseWorkflowContextFunc, error)
+	})
+	if !ok {
+		return nil, nil, serviceerror.NewUnimplemented("history engine does not support execution feed baseline acquisition")
+	}
+	return provider.GetCachedWorkflowContext(ctx, namespaceID, execution, lockPriority)
 }
 func (s *ContextImpl) GetCurrentCachedWorkflowContext(
 	ctx context.Context,

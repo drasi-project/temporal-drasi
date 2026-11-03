@@ -14,6 +14,9 @@ import (
 	chasmnexus "go.temporal.io/server/chasm/lib/nexusoperation"
 	"go.temporal.io/server/chasm/lib/scheduler"
 	chasmtests "go.temporal.io/server/chasm/lib/tests"
+	"go.temporal.io/server/chasm/lib/watch"
+	"go.temporal.io/server/chasm/lib/watchassignment"
+	"go.temporal.io/server/chasm/lib/watchregistry"
 	chasmworkflow "go.temporal.io/server/chasm/lib/workflow"
 	"go.temporal.io/server/common"
 	commoncache "go.temporal.io/server/common/cache"
@@ -130,6 +133,9 @@ var Module = fx.Options(
 	fx.Invoke(hsmnexusworkflow.RegisterCommandHandlers),
 	activity.HistoryModule,
 	scheduler.Module,
+	watch.Module,
+	watchassignment.Module,
+	watchregistry.Module,
 	callback.Module,
 	namespacereplication.Module,
 	chasmnexus.Module,
@@ -293,11 +299,16 @@ func HistoryEngineFactoryProvider(
 func ConfigProvider(
 	dc *dynamicconfig.Collection,
 	persistenceConfig config.Persistence,
+	taskCategoryRegistry tasks.TaskCategoryRegistry,
 ) *configs.Config {
-	return configs.NewConfig(
+	cfg := configs.NewConfig(
 		dc,
 		persistenceConfig.NumHistoryShards,
 	)
+	if _, ok := taskCategoryRegistry.GetCategoryByID(tasks.CategoryIDExecutionFeed); ok {
+		cfg.ExecutionFeedEnabled = dynamicconfig.EnableExecutionFeed.Get(dc)
+	}
+	return cfg
 }
 
 func ServiceErrorInterceptorProvider(

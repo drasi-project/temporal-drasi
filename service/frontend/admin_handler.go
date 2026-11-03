@@ -702,11 +702,13 @@ func (adh *AdminHandler) DescribeCluster(
 			primitives.HistoryService,
 			primitives.MatchingService,
 			primitives.WorkerService,
+			primitives.WatchService,
 		} {
 			resolver, err := monitor.GetResolver(role)
 			if err != nil {
-				if role == primitives.InternalFrontendService {
-					continue // this one is optional
+				if role == primitives.InternalFrontendService ||
+					(role == primitives.WatchService && errors.Is(err, membership.ErrUnknownService)) {
+					continue
 				}
 				return nil, err
 			}

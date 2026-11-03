@@ -473,6 +473,7 @@ func init() {
 	RegisterServiceNameToServiceTypeEnum(primitives.HistoryService, persistence.History)
 	RegisterServiceNameToServiceTypeEnum(primitives.MatchingService, persistence.Matching)
 	RegisterServiceNameToServiceTypeEnum(primitives.WorkerService, persistence.Worker)
+	RegisterServiceNameToServiceTypeEnum(primitives.WatchService, persistence.Watch)
 }
 
 func serviceNameToServiceTypeEnum(name primitives.ServiceName) (persistence.ServiceType, error) {

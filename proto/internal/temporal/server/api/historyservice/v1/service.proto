@@ -260,6 +260,16 @@ service HistoryService {
     option (temporal.server.api.common.v1.api_category).category = API_CATEGORY_STANDARD;
   }
 
+  // BootstrapExecutionFeed commits one primary-enumeration page through the owning shard.
+  rpc BootstrapExecutionFeed(BootstrapExecutionFeedRequest) returns (BootstrapExecutionFeedResponse) {
+    option (temporal.server.api.common.v1.api_category).category = API_CATEGORY_STANDARD;
+  }
+
+  // GetExecutionFeed reads a namespace-filtered interval below the durable ingestion cutoff.
+  rpc GetExecutionFeed(GetExecutionFeedRequest) returns (GetExecutionFeedResponse) {
+    option (temporal.server.api.common.v1.api_category).category = API_CATEGORY_STANDARD;
+  }
+
   // RemoveTask remove task based on type, taskid, shardid.
   rpc RemoveTask(RemoveTaskRequest) returns (RemoveTaskResponse) {
     option (temporal.server.api.common.v1.api_category).category = API_CATEGORY_STANDARD;

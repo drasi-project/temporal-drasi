@@ -901,16 +901,18 @@ func (m *executionManagerImpl) DeleteWorkflowExecution(
 	ctx context.Context,
 	request *DeleteWorkflowExecutionRequest,
 ) error {
+	copyRequest := *request
+	request = &copyRequest
 	if archetypeID, converted := m.assertAndConvertArchetypeID(request.ArchetypeID, "DeleteWorkflowExecution"); converted {
-		request = &DeleteWorkflowExecutionRequest{
-			ShardID:     request.ShardID,
-			NamespaceID: request.NamespaceID,
-			WorkflowID:  request.WorkflowID,
-			RunID:       request.RunID,
-			ArchetypeID: archetypeID,
+		request.ArchetypeID = archetypeID
+	}
+	if request.ExecutionFeedTask != nil {
+		var err error
+		request.ExecutionFeedTaskBlob, err = m.serializer.SerializeTask(request.ExecutionFeedTask)
+		if err != nil {
+			return err
 		}
 	}
-
 	return m.persistence.DeleteWorkflowExecution(ctx, request)
 }
 
@@ -974,13 +976,23 @@ func (m *executionManagerImpl) ListConcreteExecutions(
 	newResponse := &ListConcreteExecutionsResponse{
 		States:    make([]*persistencespb.WorkflowMutableState, len(response.States)),
 		PageToken: response.NextPageToken,
+		Keys:      response.Keys,
 	}
 	for i, s := range response.States {
 		state, err := m.toWorkflowMutableState(s)
 		if err != nil {
 			return nil, err
 		}
-		newResponse.States[i] = state
+		if request.KeysOnly {
+			newResponse.Keys = append(newResponse.Keys, definition.NewWorkflowKey(
+				state.ExecutionInfo.NamespaceId, state.ExecutionInfo.WorkflowId, state.ExecutionState.RunId,
+			))
+		} else {
+			newResponse.States[i] = state
+		}
+	}
+	if request.KeysOnly {
+		newResponse.States = nil
 	}
 	return newResponse, nil
 }

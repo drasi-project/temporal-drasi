@@ -9,10 +9,18 @@ import (
 	"github.com/stretchr/testify/require"
 	"github.com/stretchr/testify/suite"
 	"go.temporal.io/server/common/membership"
+	"go.temporal.io/server/common/persistence"
 	"go.temporal.io/server/common/primitives"
 	"go.temporal.io/server/common/util"
 	expmaps "golang.org/x/exp/maps"
 )
+
+func TestWatchServiceMembershipType(t *testing.T) {
+	t.Parallel()
+	serviceType, err := serviceNameToServiceTypeEnum(primitives.WatchService)
+	require.NoError(t, err)
+	require.Equal(t, persistence.ServiceType(6), serviceType)
+}
 
 type RpoSuite struct {
 	*require.Assertions // override suite.Suite.Assertions with require.Assertions; this means that s.NotNil(nil) will stop the test, not merely log an error

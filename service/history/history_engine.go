@@ -91,6 +91,7 @@ import (
 	"go.temporal.io/server/service/history/consts"
 	"go.temporal.io/server/service/history/deletemanager"
 	"go.temporal.io/server/service/history/events"
+	"go.temporal.io/server/service/history/executionfeed"
 	"go.temporal.io/server/service/history/hsm"
 	historyi "go.temporal.io/server/service/history/interfaces"
 	"go.temporal.io/server/service/history/ndc"
@@ -273,6 +274,9 @@ func NewEngineWithShardContext(
 	for _, factory := range queueProcessorFactories {
 		processor := factory.CreateQueue(shard)
 		historyEngImpl.queueProcessors[processor.Category()] = processor
+	}
+	if _, enabled := taskCategoryRegistry.GetCategoryByID(tasks.CategoryIDExecutionFeed); enabled {
+		historyEngImpl.queueProcessors[tasks.CategoryExecutionFeed] = executionfeed.NewQueue(shard)
 	}
 
 	historyEngImpl.eventsReapplier = ndc.NewEventsReapplier(shard.StateMachineRegistry(), shard.ChasmWorkflowRegistry(), shard.GetMetricsHandler(), logger)

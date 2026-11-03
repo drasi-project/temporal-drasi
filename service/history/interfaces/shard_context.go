@@ -36,6 +36,17 @@ import (
 //go:generate mockgen -package $GOPACKAGE -source $GOFILE -destination shard_context_mock.go
 
 type (
+	ExecutionFeedCaptureScope struct {
+		Epoch               int64
+		ReconstructionStart int64
+	}
+
+	// ExecutionFeedCapture is implemented by shards that persist capture activation.
+	ExecutionFeedCapture interface {
+		ExecutionFeedCaptureEpoch(namespace.ID) int64
+		BeginExecutionFeedCapture(context.Context, namespace.ID) (*ExecutionFeedCaptureScope, error)
+	}
+
 	// ShardContext represents a history engine shard
 	ShardContext interface {
 		GetShardID() int32

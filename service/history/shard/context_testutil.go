@@ -203,7 +203,7 @@ func newTestContext(t *resourcetest.Test, eventsCache events.Cache, config Conte
 		config.Config,
 		ctx.GetLogger(),
 		func() error {
-			return ctx.renewRangeLocked(false)
+			return ctx.renewRangeLocked(false, "")
 		},
 	)
 	ctx.taskKeyManager.setRangeID(config.ShardInfo.RangeId)

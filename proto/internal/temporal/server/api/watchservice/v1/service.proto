@@ -1,0 +1,25 @@
+syntax = "proto3";
+
+package temporal.server.api.watchservice.v1;
+
+import "drasi/watch/v1/service.proto";
+import "temporal/server/api/watchservice/v1/request_response.proto";
+
+option go_package = "go.temporal.io/server/api/watchservice/v1;watchservice";
+
+// WatchService exposes runtime observations, stateless query compilation, and
+// read-only administrator-configured plugin catalogs.
+service WatchService {
+  // (-- api-linter: core::0136::verb-noun=disabled
+  //     aip.dev/not-precedent: This internal observation RPC retains its existing method name. --)
+  rpc Observe(ObserveRequest) returns (ObserveResponse);
+  rpc ValidateQuery(ValidateQueryRequest) returns (drasi.watch.v1.ValidateQueryResponse);
+  // ValidateBoundQuery requires complete definitions and validates external
+  // descriptor schemas before returning a successful validation verdict.
+  rpc ValidateBoundQuery(ValidateBoundQueryRequest) returns (ValidateBoundQueryResponse);
+  rpc GetCapabilities(GetCapabilitiesRequest) returns (drasi.watch.v1.Capabilities);
+  rpc ObservePlugins(ObservePluginsRequest) returns (ObservePluginsResponse);
+  rpc ListCatalogs(drasi.watch.v1.ListCatalogsRequest) returns (drasi.watch.v1.ListCatalogsResponse);
+  rpc ListPlugins(drasi.watch.v1.ListPluginsRequest) returns (drasi.watch.v1.ListPluginsResponse);
+  rpc GetPlugin(drasi.watch.v1.GetPluginRequest) returns (drasi.watch.v1.Plugin);
+}

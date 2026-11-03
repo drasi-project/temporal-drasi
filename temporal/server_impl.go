@@ -50,6 +50,7 @@ var initOrder = map[primitives.ServiceName]int{
 	primitives.InternalFrontendService: 3,
 	primitives.FrontendService:         3,
 	primitives.WorkerService:           4,
+	primitives.WatchService:            4,
 }
 
 // NewServerFxImpl returns a new instance of server that serves one or many services.

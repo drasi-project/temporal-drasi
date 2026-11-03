@@ -1,0 +1,41 @@
+syntax = "proto3";
+
+package temporal.server.chasm.watchregistry.v1;
+
+import "chasm/lib/watchregistry/proto/v1/state.proto";
+import "drasi/watch/v1/service.proto";
+
+option go_package = "go.temporal.io/server/chasm/lib/watchregistry/gen/registrypb/v1;registrypb";
+
+message ClusterPluginLimits {
+  // Installations bounds distinct retained artifact digests.
+  uint32 installations = 1;
+  // Requests bounds permanent accepted and rejected request identities.
+  uint32 requests = 2;
+  // StateBytes bounds the complete serialized state, including receipts.
+  uint32 state_bytes = 3;
+}
+
+message ClusterPluginReceipt {
+  // Fingerprint binds the public method and request, not resolved metadata.
+  bytes fingerprint = 1;
+  oneof outcome {
+    // Digest identifies the accepted immutable artifact without observed status.
+    string digest = 2;
+    // Rejection preserves a semantic rejection across retries.
+    Rejection rejection = 3;
+  }
+}
+
+message ClusterPluginState {
+  // Generation changes when accepted installation or desired loading changes.
+  uint64 generation = 1;
+  // Installations retains artifact metadata with runtime-dependent claims cleared.
+  map<string, drasi.watch.v1.Plugin> installations = 2;
+  // Receipts never evicts accepted or rejected request identities.
+  map<string, ClusterPluginReceipt> receipts = 3;
+  // Limits is fixed when the cluster root is created.
+  ClusterPluginLimits limits = 4;
+  // DesiredLoads selects one artifact per native plugin ID, never observed loading.
+  map<string, string> desired_loads = 5;
+}

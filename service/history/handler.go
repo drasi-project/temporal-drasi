@@ -2039,11 +2039,33 @@ func (h *Handler) ForceDeleteWorkflowExecution(
 	if err != nil {
 		return nil, err
 	}
+	if h.config.ExecutionFeedEnabled != nil {
+		if _, registered := h.taskCategoryRegistry.GetCategoryByID(tasks.CategoryIDExecutionFeed); registered {
+			ns, err := h.namespaceRegistry.GetNamespaceByID(namespaceID)
+			if err != nil {
+				return nil, err
+			}
+			if h.config.ExecutionFeedEnabled(ns.Name().String()) {
+				return nil, serviceerror.NewFailedPrecondition("force deletion bypasses shard ownership and is unsupported while execution feed capture is enabled")
+			}
+		}
+	}
 	shardID := common.WorkflowIDToHistoryShard(
 		namespaceID.String(),
 		request.Request.Execution.WorkflowId,
 		h.config.NumberOfShards,
 	)
+
+	storedShard, err := h.persistenceShardManager.GetOrCreateShard(ctx, &persistence.GetOrCreateShardRequest{ShardID: shardID})
+	if err != nil {
+		return nil, err
+	}
+	if storedShard.ShardInfo.ExecutionFeedCaptureEpochs[namespaceID.String()] > 0 {
+		return nil, serviceerror.NewFailedPrecondition("force deletion is unsupported for an active execution feed capture session")
+	}
+	if storedShard.ShardInfo.RangeId <= 0 {
+		return nil, serviceerror.NewFailedPrecondition("force deletion requires an initialized shard range")
+	}
 
 	workflowExecution := request.GetRequest().GetExecution()
 	h.logger.Info("ForceDeleteWorkflowExecution requested",
@@ -2054,7 +2076,7 @@ func (h *Handler) ForceDeleteWorkflowExecution(
 	return forcedeleteworkflowexecution.Invoke(
 		ctx,
 		request,
-		shardID,
+		storedShard.ShardInfo,
 		h.chasmRegistry,
 		h.persistenceExecutionManager,
 		h.persistenceVisibilityManager,

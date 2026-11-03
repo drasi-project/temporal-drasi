@@ -28,6 +28,7 @@ var (
 		string(primitives.HistoryService),
 		string(primitives.MatchingService),
 		string(primitives.WorkerService),
+		string(primitives.WatchService),
 	}
 
 	// DefaultServices is the set of services to start by default if services are not given on

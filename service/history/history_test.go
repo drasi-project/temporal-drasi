@@ -101,7 +101,7 @@ func (s *historyAPISuite) TestDeleteWorkflowExecution_DeleteCurrentExecution() {
 	resp, err := forcedeleteworkflowexecution.Invoke(
 		context.Background(),
 		request,
-		shardID,
+		&persistencespb.ShardInfo{ShardId: shardID, RangeId: 1},
 		s.chasmRegistry,
 		s.mockExecutionMgr,
 		s.mockVisibilityMgr,
@@ -151,13 +151,14 @@ func (s *historyAPISuite) TestDeleteWorkflowExecution_DeleteCurrentExecution() {
 		WorkflowID:  execution.WorkflowId,
 		RunID:       runID,
 		ArchetypeID: chasm.WorkflowArchetypeID,
+		RangeID:     1,
 	}).Return(nil)
 	s.mockExecutionMgr.EXPECT().DeleteHistoryBranch(gomock.Any(), gomock.Any()).Times(3)
 
 	_, err = forcedeleteworkflowexecution.Invoke(
 		context.Background(),
 		request,
-		shardID,
+		&persistencespb.ShardInfo{ShardId: shardID, RangeId: 1},
 		s.chasmRegistry,
 		s.mockExecutionMgr,
 		s.mockVisibilityMgr,
@@ -197,7 +198,7 @@ func (s *historyAPISuite) TestDeleteWorkflowExecution_LoadMutableStateFailed() {
 	_, err := forcedeleteworkflowexecution.Invoke(
 		context.Background(),
 		request,
-		shardID,
+		&persistencespb.ShardInfo{ShardId: shardID, RangeId: 1},
 		s.chasmRegistry,
 		s.mockExecutionMgr,
 		s.mockVisibilityMgr,

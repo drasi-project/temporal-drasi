@@ -397,6 +397,10 @@ func (d *RPCFactory) CreateMatchingGRPCConnection(rpcAddress string) *grpc.Clien
 	return d.createInternodeGRPCConnection(rpcAddress, primitives.MatchingService)
 }
 
+func (d *RPCFactory) CreateWatchGRPCConnection(rpcAddress string) *grpc.ClientConn {
+	return d.createInternodeGRPCConnection(rpcAddress, primitives.WatchService)
+}
+
 func (d *RPCFactory) dial(hostName string, tlsClientConfig *tls.Config, dialOptions ...grpc.DialOption) *grpc.ClientConn {
 	dialOptions = append(d.commonDialOptions, dialOptions...)
 	connection, err := Dial(hostName, tlsClientConfig, d.logger, d.metricsHandler, dialOptions...)

@@ -58,6 +58,10 @@ func (f *RPCFactory) CreateMatchingGRPCConnection(rpcAddress string) *grpc.Clien
 	return f.dial(rpcAddress)
 }
 
+func (f *RPCFactory) CreateWatchGRPCConnection(rpcAddress string) *grpc.ClientConn {
+	return f.dial(rpcAddress)
+}
+
 func (f *RPCFactory) dial(rpcAddress string) *grpc.ClientConn {
 	dialOptions := append(f.dialOptions,
 		grpc.WithContextDialer(func(ctx context.Context, s string) (net.Conn, error) {

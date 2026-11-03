@@ -51,6 +51,8 @@ message ShardInfo {
   reserved 15;
   reserved 16;
   map<int32, QueueState> queue_states = 17;
+  // Capture epochs fence transactions prepared before namespace feed activation.
+  map<string, int64> execution_feed_capture_epochs = 18;
 }
 
 // execution column

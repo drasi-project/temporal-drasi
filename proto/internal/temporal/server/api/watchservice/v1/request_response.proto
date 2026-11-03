@@ -1,0 +1,113 @@
+syntax = "proto3";
+
+package temporal.server.api.watchservice.v1;
+
+import "drasi/watch/v1/service.proto";
+
+option go_package = "go.temporal.io/server/api/watchservice/v1;watchservice";
+
+message GetCapabilitiesRequest {
+  // NamespaceId selects the authoritative namespace policy scope.
+  string namespace_id = 1;
+}
+
+message ValidateQueryRequest {
+  // NamespaceId is the authoritative namespace UUID, not a caller-supplied name.
+  string namespace_id = 1;
+  // Spec is compiled without creating resources or reading source data.
+  drasi.watch.v1.QuerySpec spec = 2;
+  // SourceDefinitions contains every exact Source pin from one authoritative registry cut.
+  // An empty list retains compilation-only behavior for older internal callers.
+  repeated drasi.watch.v1.Source source_definitions = 3;
+}
+
+message ValidateBoundQueryRequest {
+  // Validation contains the query and every authoritative Source definition.
+  ValidateQueryRequest validation = 1;
+}
+
+message ValidateBoundQueryResponse {
+  // Validation approves a query only after its external descriptor schemas pass.
+  drasi.watch.v1.ValidateQueryResponse validation = 1;
+}
+
+message Owner {
+  // Epoch identifies the non-expiring assignment.
+  uint64 epoch = 1;
+  // StorageHostId identifies the assigned persistent volume, not a network address.
+  string storage_host_id = 2;
+  // ProcessBootId identifies the assigned process.
+  string process_boot_id = 3;
+}
+
+message Target {
+  // Kind distinguishes source, query and Watch IDs.
+  ResourceKind kind = 1;
+  // Id is the public resource ID.
+  string id = 2;
+  // Revision is the accepted public revision, not a native activation.
+  uint64 revision = 3;
+  // Incarnation identifies the resource lifetime.
+  string incarnation = 4;
+}
+
+message ObserveRequest {
+  // NamespaceId is the authoritative namespace UUID.
+  string namespace_id = 1;
+  // Generation identifies the registry cut containing every requested target.
+  uint64 generation = 2;
+  // Owner must match the active cooperative assignment.
+  Owner owner = 3;
+  // Targets contains at most one public page of exact resource identities.
+  repeated Target targets = 4;
+}
+
+message ResourceObservation {
+  // Target repeats the exact requested identity.
+  Target target = 1;
+  // Status is absent when no matching fresh runtime evidence is available.
+  drasi.watch.v1.ResourceStatus status = 2;
+}
+
+message ObserveResponse {
+  // NamespaceId repeats the requested namespace UUID.
+  string namespace_id = 1;
+  // Generation repeats the observed registry cut.
+  uint64 generation = 2;
+  // Owner identifies the sampled cooperative owner.
+  Owner owner = 3;
+  // Observations correspond one-to-one with the requested targets.
+  repeated ResourceObservation observations = 4;
+}
+
+message ObservePluginsRequest {
+  // Generation identifies the complete cluster plugin intent cut.
+  uint64 generation = 1;
+  // Digests selects at most one page of retained artifacts, or no artifacts for readiness.
+  repeated string digests = 2;
+}
+
+message PluginObservation {
+  // Digest repeats the requested content hash.
+  string digest = 1;
+  // Status reduces management and every applicable local namespace runtime.
+  drasi.watch.v1.PluginHostStatus status = 2;
+}
+
+message ObservePluginsResponse {
+  // Generation repeats the complete cluster plugin intent cut.
+  uint64 generation = 1;
+  // StorageHostId identifies this host's persistent volume.
+  string storage_host_id = 2;
+  // ProcessBootId fences observations from another Watch process.
+  string process_boot_id = 3;
+  // Observations correspond one-to-one with the requested digests.
+  repeated PluginObservation observations = 4;
+}
+
+enum ResourceKind {
+  RESOURCE_KIND_UNSPECIFIED = 0;
+  RESOURCE_KIND_SOURCE = 1;
+  RESOURCE_KIND_QUERY = 2;
+  RESOURCE_KIND_WATCH = 3;
+}

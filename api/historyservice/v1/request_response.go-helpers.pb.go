@@ -2743,6 +2743,154 @@ func (this *GetShardResponse) Equal(that interface{}) bool {
 	return proto.Equal(this, that1)
 }
 
+// Marshal an object of type BootstrapExecutionFeedRequest to the protobuf v3 wire format
+func (val *BootstrapExecutionFeedRequest) Marshal() ([]byte, error) {
+	return proto.Marshal(val)
+}
+
+// Unmarshal an object of type BootstrapExecutionFeedRequest from the protobuf v3 wire format
+func (val *BootstrapExecutionFeedRequest) Unmarshal(buf []byte) error {
+	return proto.Unmarshal(buf, val)
+}
+
+// Size returns the size of the object, in bytes, once serialized
+func (val *BootstrapExecutionFeedRequest) Size() int {
+	return proto.Size(val)
+}
+
+// Equal returns whether two BootstrapExecutionFeedRequest values are equivalent by recursively
+// comparing the message's fields.
+// For more information see the documentation for
+// https://pkg.go.dev/google.golang.org/protobuf/proto#Equal
+func (this *BootstrapExecutionFeedRequest) Equal(that interface{}) bool {
+	if that == nil {
+		return this == nil
+	}
+
+	var that1 *BootstrapExecutionFeedRequest
+	switch t := that.(type) {
+	case *BootstrapExecutionFeedRequest:
+		that1 = t
+	case BootstrapExecutionFeedRequest:
+		that1 = &t
+	default:
+		return false
+	}
+
+	return proto.Equal(this, that1)
+}
+
+// Marshal an object of type BootstrapExecutionFeedResponse to the protobuf v3 wire format
+func (val *BootstrapExecutionFeedResponse) Marshal() ([]byte, error) {
+	return proto.Marshal(val)
+}
+
+// Unmarshal an object of type BootstrapExecutionFeedResponse from the protobuf v3 wire format
+func (val *BootstrapExecutionFeedResponse) Unmarshal(buf []byte) error {
+	return proto.Unmarshal(buf, val)
+}
+
+// Size returns the size of the object, in bytes, once serialized
+func (val *BootstrapExecutionFeedResponse) Size() int {
+	return proto.Size(val)
+}
+
+// Equal returns whether two BootstrapExecutionFeedResponse values are equivalent by recursively
+// comparing the message's fields.
+// For more information see the documentation for
+// https://pkg.go.dev/google.golang.org/protobuf/proto#Equal
+func (this *BootstrapExecutionFeedResponse) Equal(that interface{}) bool {
+	if that == nil {
+		return this == nil
+	}
+
+	var that1 *BootstrapExecutionFeedResponse
+	switch t := that.(type) {
+	case *BootstrapExecutionFeedResponse:
+		that1 = t
+	case BootstrapExecutionFeedResponse:
+		that1 = &t
+	default:
+		return false
+	}
+
+	return proto.Equal(this, that1)
+}
+
+// Marshal an object of type GetExecutionFeedRequest to the protobuf v3 wire format
+func (val *GetExecutionFeedRequest) Marshal() ([]byte, error) {
+	return proto.Marshal(val)
+}
+
+// Unmarshal an object of type GetExecutionFeedRequest from the protobuf v3 wire format
+func (val *GetExecutionFeedRequest) Unmarshal(buf []byte) error {
+	return proto.Unmarshal(buf, val)
+}
+
+// Size returns the size of the object, in bytes, once serialized
+func (val *GetExecutionFeedRequest) Size() int {
+	return proto.Size(val)
+}
+
+// Equal returns whether two GetExecutionFeedRequest values are equivalent by recursively
+// comparing the message's fields.
+// For more information see the documentation for
+// https://pkg.go.dev/google.golang.org/protobuf/proto#Equal
+func (this *GetExecutionFeedRequest) Equal(that interface{}) bool {
+	if that == nil {
+		return this == nil
+	}
+
+	var that1 *GetExecutionFeedRequest
+	switch t := that.(type) {
+	case *GetExecutionFeedRequest:
+		that1 = t
+	case GetExecutionFeedRequest:
+		that1 = &t
+	default:
+		return false
+	}
+
+	return proto.Equal(this, that1)
+}
+
+// Marshal an object of type GetExecutionFeedResponse to the protobuf v3 wire format
+func (val *GetExecutionFeedResponse) Marshal() ([]byte, error) {
+	return proto.Marshal(val)
+}
+
+// Unmarshal an object of type GetExecutionFeedResponse from the protobuf v3 wire format
+func (val *GetExecutionFeedResponse) Unmarshal(buf []byte) error {
+	return proto.Unmarshal(buf, val)
+}
+
+// Size returns the size of the object, in bytes, once serialized
+func (val *GetExecutionFeedResponse) Size() int {
+	return proto.Size(val)
+}
+
+// Equal returns whether two GetExecutionFeedResponse values are equivalent by recursively
+// comparing the message's fields.
+// For more information see the documentation for
+// https://pkg.go.dev/google.golang.org/protobuf/proto#Equal
+func (this *GetExecutionFeedResponse) Equal(that interface{}) bool {
+	if that == nil {
+		return this == nil
+	}
+
+	var that1 *GetExecutionFeedResponse
+	switch t := that.(type) {
+	case *GetExecutionFeedResponse:
+		that1 = t
+	case GetExecutionFeedResponse:
+		that1 = &t
+	default:
+		return false
+	}
+
+	return proto.Equal(this, that1)
+}
+
 // Marshal an object of type RemoveTaskRequest to the protobuf v3 wire format
 func (val *RemoveTaskRequest) Marshal() ([]byte, error) {
 	return proto.Marshal(val)

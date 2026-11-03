@@ -11,6 +11,7 @@ import (
 	"sort"
 	"strings"
 
+	watchpb "github.com/drasi-project/temporal-drasi/contracts/watch/v1"
 	expmaps "golang.org/x/exp/maps"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/reflect/protodesc"
@@ -184,12 +185,38 @@ func main() {
 
 	checkImports(importMap) // doesn't return if any errors
 
-	set := &descriptorpb.FileDescriptorSet{}
+	files := make([]protoreflect.FileDescriptor, 0, len(importMap)+1)
 	for _, fd := range importMap {
-		set.File = append(set.File, protodesc.ToFileDescriptorProto(fd))
+		files = append(files, fd)
 	}
+	files = append(files, watchpb.File_drasi_watch_v1_service_proto)
+	set := dependencySet(files...)
 
 	b, err := proto.Marshal(set)
 	fatalIfErr(err)
 	fatalIfErr(os.WriteFile(*out, b, 0644))
+}
+
+func dependencySet(files ...protoreflect.FileDescriptor) *descriptorpb.FileDescriptorSet {
+	all := make(map[string]protoreflect.FileDescriptor)
+	var collect func(protoreflect.FileDescriptor)
+	collect = func(file protoreflect.FileDescriptor) {
+		if _, ok := all[file.Path()]; ok {
+			return
+		}
+		all[file.Path()] = file
+		for i := 0; i < file.Imports().Len(); i++ {
+			collect(file.Imports().Get(i))
+		}
+	}
+	for _, file := range files {
+		collect(file)
+	}
+	paths := expmaps.Keys(all)
+	sort.Strings(paths)
+	set := &descriptorpb.FileDescriptorSet{}
+	for _, path := range paths {
+		set.File = append(set.File, protodesc.ToFileDescriptorProto(all[path]))
+	}
+	return set
 }

@@ -31,6 +31,7 @@ const (
 	CLUSTER_MEMBER_ROLE_HISTORY     ClusterMemberRole = 2
 	CLUSTER_MEMBER_ROLE_MATCHING    ClusterMemberRole = 3
 	CLUSTER_MEMBER_ROLE_WORKER      ClusterMemberRole = 4
+	CLUSTER_MEMBER_ROLE_WATCH       ClusterMemberRole = 6
 )
 
 // Enum value maps for ClusterMemberRole.
@@ -41,6 +42,7 @@ var (
 		2: "CLUSTER_MEMBER_ROLE_HISTORY",
 		3: "CLUSTER_MEMBER_ROLE_MATCHING",
 		4: "CLUSTER_MEMBER_ROLE_WORKER",
+		6: "CLUSTER_MEMBER_ROLE_WATCH",
 	}
 	ClusterMemberRole_value = map[string]int32{
 		"CLUSTER_MEMBER_ROLE_UNSPECIFIED": 0,
@@ -48,6 +50,7 @@ var (
 		"CLUSTER_MEMBER_ROLE_HISTORY":     2,
 		"CLUSTER_MEMBER_ROLE_MATCHING":    3,
 		"CLUSTER_MEMBER_ROLE_WORKER":      4,
+		"CLUSTER_MEMBER_ROLE_WATCH":       6,
 	}
 )
 
@@ -69,6 +72,8 @@ func (x ClusterMemberRole) String() string {
 		return "Matching"
 	case CLUSTER_MEMBER_ROLE_WORKER:
 		return "Worker"
+	case CLUSTER_MEMBER_ROLE_WATCH:
+		return "Watch"
 	default:
 		return strconv.Itoa(int(x))
 	}
@@ -169,13 +174,14 @@ var File_temporal_server_api_enums_v1_cluster_proto protoreflect.FileDescriptor
 
 const file_temporal_server_api_enums_v1_cluster_proto_rawDesc = "" +
 	"\n" +
-	"*temporal/server/api/enums/v1/cluster.proto\x12\x1ctemporal.server.api.enums.v1*\xbd\x01\n" +
+	"*temporal/server/api/enums/v1/cluster.proto\x12\x1ctemporal.server.api.enums.v1*\xdc\x01\n" +
 	"\x11ClusterMemberRole\x12#\n" +
 	"\x1fCLUSTER_MEMBER_ROLE_UNSPECIFIED\x10\x00\x12 \n" +
 	"\x1cCLUSTER_MEMBER_ROLE_FRONTEND\x10\x01\x12\x1f\n" +
 	"\x1bCLUSTER_MEMBER_ROLE_HISTORY\x10\x02\x12 \n" +
 	"\x1cCLUSTER_MEMBER_ROLE_MATCHING\x10\x03\x12\x1e\n" +
-	"\x1aCLUSTER_MEMBER_ROLE_WORKER\x10\x04*\xa7\x01\n" +
+	"\x1aCLUSTER_MEMBER_ROLE_WORKER\x10\x04\x12\x1d\n" +
+	"\x19CLUSTER_MEMBER_ROLE_WATCH\x10\x06*\xa7\x01\n" +
 	"\vHealthState\x12\x1c\n" +
 	"\x18HEALTH_STATE_UNSPECIFIED\x10\x00\x12\x18\n" +
 	"\x14HEALTH_STATE_SERVING\x10\x01\x12\x1c\n" +

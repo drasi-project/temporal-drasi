@@ -20,6 +20,7 @@ import (
 	sdkclient "go.temporal.io/sdk/client"
 	sdkworker "go.temporal.io/sdk/worker"
 	"go.temporal.io/server/api/adminservice/v1"
+	registrypb "go.temporal.io/server/chasm/lib/watchregistry/gen/registrypb/v1"
 	"go.temporal.io/server/common"
 	"go.temporal.io/server/common/archiver/provider"
 	"go.temporal.io/server/common/authorization"
@@ -455,6 +456,16 @@ func (e *TestEnv) T() *testing.T {
 
 func (e *TestEnv) Tv() *testvars.TestVars {
 	return e.tv
+}
+
+// ClusterPluginClient isolates the fixed cluster-global root from other tests.
+func (e *TestEnv) ClusterPluginClient() registrypb.ClusterPluginServiceClient {
+	e.t.Helper()
+	if !e.dedicatedGuard.required {
+		e.t.Fatal("cluster plugin intent requires a dedicated test cluster")
+	}
+	e.dedicatedGuard.record("cluster-global plugin intent used")
+	return e.cluster.host.ClusterPluginClient()
 }
 
 // InjectRequestFault registers a pre-handler gRPC fault injection scoped to this test's namespace.

@@ -4,17 +4,20 @@ import (
 	"bytes"
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"time"
 
 	"go.temporal.io/api/serviceerror"
 	enumsspb "go.temporal.io/server/api/enums/v1"
 	persistencespb "go.temporal.io/server/api/persistence/v1"
+	"go.temporal.io/server/common/definition"
 	"go.temporal.io/server/common/log"
 	p "go.temporal.io/server/common/persistence"
 	"go.temporal.io/server/common/persistence/serialization"
 	"go.temporal.io/server/common/persistence/sql/sqlplugin"
 	"go.temporal.io/server/common/primitives"
+	"go.temporal.io/server/service/history/tasks"
 )
 
 type sqlExecutionStore struct {
@@ -581,7 +584,13 @@ func (m *sqlExecutionStore) DeleteWorkflowExecution(
 ) error {
 	namespaceID := primitives.MustParseUUID(request.NamespaceID)
 	runID := primitives.MustParseUUID(request.RunID)
-	return m.txExecute(ctx, "DeleteWorkflowExecution", func(tx sqlplugin.Tx) error {
+	execute := m.txExecute
+	if request.RangeID != 0 || request.ExecutionFeedTask != nil {
+		execute = func(ctx context.Context, operation string, action func(sqlplugin.Tx) error) error {
+			return m.txExecuteShardLocked(ctx, operation, request.ShardID, request.RangeID, action)
+		}
+	}
+	return execute(ctx, "DeleteWorkflowExecution", func(tx sqlplugin.Tx) error {
 		_, err := tx.DeleteAllFromChildExecutionInfoMaps(ctx, sqlplugin.ChildExecutionInfoMapsAllFilter{
 			ShardID:     request.ShardID,
 			NamespaceID: namespaceID,
@@ -663,6 +672,14 @@ func (m *sqlExecutionStore) DeleteWorkflowExecution(
 		if err != nil {
 			return fmt.Errorf("failed to execute DeleteFromExecutions: %w", err)
 		}
+		if task := request.ExecutionFeedTask; task != nil {
+			if request.ExecutionFeedTaskBlob == nil {
+				return serviceerror.NewInvalidArgument("execution feed deletion task is not serialized")
+			}
+			return applyTasks(ctx, tx, request.ShardID, map[tasks.Category][]p.InternalHistoryTask{
+				tasks.CategoryExecutionFeed: {{Key: task.GetKey(), Blob: request.ExecutionFeedTaskBlob}},
+			})
+		}
 		return nil
 	})
 }
@@ -743,10 +760,59 @@ func (m *sqlExecutionStore) setWorkflowExecutionTx(
 }
 
 func (m *sqlExecutionStore) ListConcreteExecutions(
-	_ context.Context,
-	_ *p.ListConcreteExecutionsRequest,
+	ctx context.Context,
+	request *p.ListConcreteExecutionsRequest,
 ) (*p.InternalListConcreteExecutionsResponse, error) {
-	return nil, serviceerror.NewUnimplemented("ListConcreteExecutions is not implemented")
+	reader, ok := m.DB.(sqlplugin.ExecutionKeyReader)
+	if !ok {
+		return nil, serviceerror.NewUnimplemented("SQL plugin does not support primary execution enumeration")
+	}
+	if request.PageSize <= 0 {
+		return nil, serviceerror.NewInvalidArgument("execution enumeration page size must be positive")
+	}
+	page := sqlplugin.ExecutionKeyPage{ShardID: request.ShardID, Limit: request.PageSize}
+	if len(request.PageToken) != 0 {
+		page.After = &sqlplugin.ExecutionsFilter{}
+		if err := json.Unmarshal(request.PageToken, page.After); err != nil || page.After.ShardID != request.ShardID ||
+			len(page.After.NamespaceID) != 16 || len(page.After.RunID) != 16 {
+			return nil, serviceerror.NewInvalidArgument("invalid execution enumeration cursor")
+		}
+	}
+	rows, err := reader.SelectExecutionKeys(ctx, page)
+	if _, ok := err.(*serviceerror.Unimplemented); ok {
+		return nil, err
+	}
+	if err != nil {
+		return nil, serviceerror.NewUnavailablef("execution enumeration failed: %v", err)
+	}
+	response := &p.InternalListConcreteExecutionsResponse{}
+	for _, row := range rows {
+		key := definition.NewWorkflowKey(row.NamespaceID.String(), row.WorkflowID, row.RunID.String())
+		if request.KeysOnly {
+			response.Keys = append(response.Keys, key)
+			continue
+		}
+		state, err := m.GetWorkflowExecution(ctx, &p.GetWorkflowExecutionRequest{
+			ShardID: request.ShardID, NamespaceID: key.NamespaceID, WorkflowID: key.WorkflowID, RunID: key.RunID,
+		})
+		if _, ok := err.(*serviceerror.NotFound); ok {
+			continue
+		}
+		if err != nil {
+			return nil, err
+		}
+		response.States = append(response.States, state.State)
+	}
+	if len(rows) == request.PageSize {
+		last := rows[len(rows)-1]
+		response.NextPageToken, err = json.Marshal(sqlplugin.ExecutionsFilter{
+			ShardID: request.ShardID, NamespaceID: last.NamespaceID, WorkflowID: last.WorkflowID, RunID: last.RunID,
+		})
+		if err != nil {
+			return nil, err
+		}
+	}
+	return response, nil
 }
 
 func (m *sqlExecutionStore) GetHistoryBranchUtil() p.HistoryBranchUtil {

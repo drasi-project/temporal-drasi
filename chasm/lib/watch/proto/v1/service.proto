@@ -1,0 +1,162 @@
+syntax = "proto3";
+
+package temporal.server.chasm.watch.v1;
+
+import "chasm/lib/watch/proto/v1/state.proto";
+import "drasi/watch/v1/service.proto";
+import "google/protobuf/empty.proto";
+import "google/protobuf/timestamp.proto";
+import "temporal/api/workflowservice/v1/request_response.proto";
+import "temporal/server/api/common/v1/api_category.proto";
+import "temporal/server/api/routing/v1/extension.proto";
+
+option go_package = "go.temporal.io/server/chasm/lib/watch/gen/watchpb/v1;watchpb";
+
+// ControlService is an internal History service, not a browser-facing API.
+service ControlService {
+  rpc CreateExecution(CreateExecutionRequest) returns (ExecutionResponse) {
+    option (temporal.server.api.routing.v1.routing).business_id = "execution_id";
+    option (temporal.server.api.common.v1.api_category).category = API_CATEGORY_STANDARD;
+  }
+  rpc DescribeExecution(DescribeExecutionRequest) returns (ExecutionResponse) {
+    option (temporal.server.api.routing.v1.routing).business_id = "execution_id";
+    option (temporal.server.api.common.v1.api_category).category = API_CATEGORY_STANDARD;
+  }
+  rpc AcceptOutput(AcceptOutputRequest) returns (AcceptOutputResponse) {
+    option (temporal.server.api.routing.v1.routing).business_id = "execution_id";
+    option (temporal.server.api.common.v1.api_category).category = API_CATEGORY_STANDARD;
+  }
+  rpc MutateExecution(MutateExecutionRequest) returns (ExecutionResponse) {
+    option (temporal.server.api.routing.v1.routing).business_id = "execution_id";
+    option (temporal.server.api.common.v1.api_category).category = API_CATEGORY_STANDARD;
+  }
+  rpc RetryDelivery(RetryDeliveryRequest) returns (RetryDeliveryResponse) {
+    option (temporal.server.api.routing.v1.routing).business_id = "execution_id";
+    option (temporal.server.api.common.v1.api_category).category = API_CATEGORY_STANDARD;
+  }
+}
+
+message CreateExecutionRequest {
+  // Namespace ID identifies the owning Temporal namespace.
+  string namespace_id = 1;
+  // Execution ID is the immutable internal Watch execution identity.
+  string execution_id = 2;
+  // Watch ID is the public resource identifier.
+  string watch_id = 3;
+  // Revision is allocated by the durable resource registry.
+  uint64 revision = 4;
+  // Definition is the serialized public Watch resource.
+  bytes definition = 5;
+  // Once closes acceptance after its first matching action.
+  bool once = 6;
+  // Deadline is required for a one-shot condition.
+  google.protobuf.Timestamp deadline = 7;
+  // Request ID identifies retries of this execution creation.
+  string request_id = 8;
+}
+
+message DescribeExecutionRequest {
+  // Namespace ID identifies the owning Temporal namespace.
+  string namespace_id = 1;
+  // Execution ID identifies the immutable internal Watch execution.
+  string execution_id = 2;
+}
+
+message ExecutionResponse {
+  // State is a copy of the committed control state.
+  State state = 1;
+  // Deliveries contain bounded metadata without serialized workflow requests.
+  repeated Intent deliveries = 2;
+}
+
+message PreparedAction {
+  // Ordinal identifies the row inside the native output.
+  uint64 ordinal = 1;
+  // Row identity is stable within its output incarnation.
+  string row_identity = 2;
+  // Operation is frozen before entering the History transaction.
+  oneof operation {
+    temporal.api.workflowservice.v1.StartWorkflowExecutionRequest start = 3;
+    temporal.api.workflowservice.v1.SignalWorkflowExecutionRequest signal = 4;
+    temporal.api.workflowservice.v1.SignalWithStartWorkflowExecutionRequest signal_with_start = 5;
+  }
+}
+
+message AcceptOutputRequest {
+  // Namespace ID identifies the owning Temporal namespace.
+  string namespace_id = 1;
+  // Execution ID identifies the immutable internal Watch execution.
+  string execution_id = 2;
+  // Revision fences acceptance using the current control lifecycle revision.
+  uint64 revision = 3;
+  // Owner epoch is the assignment held by the native host.
+  uint64 owner_epoch = 4;
+  // Incarnation identifies continuous native output.
+  string incarnation = 5;
+  // Sequence is the native snapshot or delta sequence.
+  uint64 sequence = 6;
+  // First ordinal identifies the beginning of this chunk.
+  uint64 first_ordinal = 7;
+  // Item count includes rows filtered out by the Watch's trigger policy.
+  uint64 item_count = 8;
+  // Complete marks the last chunk of this native output.
+  bool complete = 9;
+  // Initial identifies the initial snapshot, whose sequence may be zero.
+  bool initial = 10;
+  // Actions are the immutable effects selected from this chunk.
+  repeated PreparedAction actions = 11;
+}
+
+message AcceptOutputResponse {
+  // Cursor is committed atomically with the action intents.
+  Cursor cursor = 1;
+  // Action IDs identify newly accepted intents.
+  repeated string action_ids = 2;
+  // Duplicate means the chunk was already durably accepted.
+  bool duplicate = 3;
+}
+
+message ClaimMutation {
+  // Previous epoch is the assignment expected before this claim.
+  uint64 previous_epoch = 1;
+  // New epoch is allocated by the durable runtime assignment.
+  uint64 new_epoch = 2;
+}
+
+message PauseMutation {
+  // Paused selects pause or resume without retracting accepted actions.
+  bool paused = 1;
+}
+
+message RetryDeliveryRequest {
+  // Namespace ID identifies the owning Temporal namespace.
+  string namespace_id = 1;
+  // Execution ID identifies the immutable internal Watch execution.
+  string execution_id = 2;
+  // Command is authorized against its public revision by the namespace registry.
+  drasi.watch.v1.RetryDeliveryRequest command = 3;
+}
+
+message RetryDeliveryResponse {
+  // Delivery is the original committed retry result.
+  drasi.watch.v1.Delivery delivery = 1;
+}
+
+message MutateExecutionRequest {
+  reserved 7;
+  reserved "retry_delivery";
+  // Namespace ID identifies the owning Temporal namespace.
+  string namespace_id = 1;
+  // Execution ID identifies the immutable internal Watch execution.
+  string execution_id = 2;
+  // Expected revision fences stale lifecycle changes.
+  uint64 expected_revision = 3;
+  // Owner epoch fences runtime mutations; zero permits administrative cleanup.
+  uint64 owner_epoch = 8;
+  // Mutation selects one lifecycle transition.
+  oneof mutation {
+    ClaimMutation claim = 4;
+    PauseMutation pause = 5;
+    google.protobuf.Empty cancel = 6;
+  }
+}
