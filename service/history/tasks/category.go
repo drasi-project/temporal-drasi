@@ -18,13 +18,15 @@ type (
 // WARNING: These IDS are persisted in the database. Do not change them.
 
 const (
-	CategoryIDTransfer    = 1
-	CategoryIDTimer       = 2
-	CategoryIDReplication = 3
-	CategoryIDVisibility  = 4
-	CategoryIDArchival    = 5
-	CategoryIDMemoryTimer = 6
-	CategoryIDOutbound    = 7
+	CategoryIDTransfer             = 1
+	CategoryIDTimer                = 2
+	CategoryIDReplication          = 3
+	CategoryIDVisibility           = 4
+	CategoryIDArchival             = 5
+	CategoryIDMemoryTimer          = 6
+	CategoryIDOutbound             = 7
+	CategoryIDExecutionFeed        = 8
+	CategoryIDExecutionFeedJournal = 9
 )
 
 const (
@@ -85,6 +87,11 @@ var (
 		cType: CategoryTypeImmediate,
 		name:  categoryNameOutbound,
 	}
+
+	CategoryExecutionFeed = NewCategory(CategoryIDExecutionFeed, CategoryTypeImmediate, "execution-feed")
+
+	// CategoryExecutionFeedJournal is retained data, not a queue to be completed.
+	CategoryExecutionFeedJournal = NewCategory(CategoryIDExecutionFeedJournal, CategoryTypeImmediate, "execution-feed-journal")
 )
 
 func NewCategory(id int, cType CategoryType, name string) Category {

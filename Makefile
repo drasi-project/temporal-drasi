@@ -319,7 +319,7 @@ rm -rf $${tmpdir} ;\
 endef
 
 ##### Proto #####
-$(API_BINPB): go.mod go.sum $(PROTO_FILES)
+$(API_BINPB): go.mod go.sum $(PROTO_FILES) cmd/tools/getproto/main.go $(wildcard contracts/watch/v1/*.pb.go)
 	@printf $(COLOR) "Generating proto dependencies image..."
 	@./cmd/tools/getproto/run.sh --out $@
 
@@ -331,7 +331,7 @@ $(CHASM_BINPB): $(API_BINPB) $(INTERNAL_BINPB) $(CHASM_PROTO_FILES)
 	@printf $(COLOR) "Generate CHASM proto image..."
 	@protoc --descriptor_set_in=$(API_BINPB):$(INTERNAL_BINPB) -I=. $(CHASM_PROTO_FILES) -o $@
 
-protoc: $(PROTOGEN) $(MOCKGEN) $(GOIMPORTS) $(PROTOC_GEN_GO) $(PROTOC_GEN_GO_GRPC) $(PROTOC_GEN_GO_HELPERS) $(API_BINPB) $(LOCALBIN)/protoc-gen-go-chasm
+protoc: $(PROTOGEN) $(MOCKGEN) $(GOIMPORTS) $(PROTOC_GEN_GO) $(PROTOC_GEN_GO_GRPC) $(PROTOC_GEN_GO_HELPERS) $(API_BINPB) $(CHASM_BINPB) $(LOCALBIN)/protoc-gen-go-chasm
 	@go run ./cmd/tools/protogen \
 		-root=$(ROOT) \
 		-proto-out=$(PROTO_OUT) \
@@ -424,7 +424,14 @@ lint-code-fast:
 		git diff --no-renames --name-only "$$base" -- '*.go'; \
 		git ls-files --others --exclude-standard -- '*.go'; \
 	} | sed 's|^|./|; s|/[^/]*$$||' | sort -u \
-	  | while read -r dir; do [ -d "$$dir" ] && printf '%s ' "$$dir"; done); \
+	  | while read -r dir; do \
+		[ -d "$$dir" ] || continue; \
+		module_dir="$$dir"; \
+		while [ "$$module_dir" != "." ] && [ ! -f "$$module_dir/go.mod" ]; do \
+			module_dir=$$(dirname "$$module_dir"); \
+		done; \
+		if [ "$$module_dir" = "." ]; then printf '%s ' "$$dir"; fi; \
+	  done); \
 	if [ -z "$$targets" ]; then \
 		printf $(COLOR) "No changed Go packages to lint."; \
 	else \
@@ -475,7 +482,7 @@ lint-api: $(API_LINTER) $(API_BINPB)
 
 lint-protos: $(BUF) $(INTERNAL_BINPB) $(CHASM_BINPB)
 	@printf $(COLOR) "Linting proto definitions..."
-	@$(BUF) lint $(INTERNAL_BINPB)
+	@$(BUF) lint --config $(PROTO_ROOT)/internal/buf.yaml $(INTERNAL_BINPB)
 	@$(BUF) lint --config chasm/lib/buf.yaml $(CHASM_BINPB)
 
 fmt: fmt-gofix fmt-imports fmt-protos fmt-yaml

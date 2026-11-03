@@ -1,0 +1,2551 @@
+diff --git a/components/bootstrappers/README.md b/components/bootstrappers/README.md
+index 8de19349a88b44df5aeab679b4ae2d74bd03f6eb..f456b4d736d686df661d2524e9f427cd81cda16b 100644
+--- a/components/bootstrappers/README.md
++++ b/components/bootstrappers/README.md
+@@ -1047,8 +1047,8 @@ In `lib.rs`, invoke the macro to generate the C ABI entry points. Gate it behind
+ #[cfg(feature = "dynamic-plugin")]
+ drasi_plugin_sdk::export_plugin!(
+     plugin_id = "my-bootstrap",
+-    core_version = env!("CARGO_PKG_VERSION"),
+-    lib_version = env!("CARGO_PKG_VERSION"),
++    core_version = drasi_core::VERSION,
++    lib_version = drasi_lib::VERSION,
+     plugin_version = env!("CARGO_PKG_VERSION"),
+     source_descriptors = [],
+     reaction_descriptors = [],
+@@ -1056,6 +1056,9 @@ drasi_plugin_sdk::export_plugin!(
+ );
+ ```
+ 
++The dependency-owned version constants report the actual linked engine/runtime.
++Use `env!("CARGO_PKG_VERSION")` only for `plugin_version`, not dependency metadata.
++
+ ### Building
+ 
+ Build the shared library with the `dynamic-plugin` feature enabled:
+diff --git a/components/bootstrappers/postgres/src/lib.rs b/components/bootstrappers/postgres/src/lib.rs
+index d221beca752b8c0d45329fc15648d698185e8917..eece545025a4d4f1d896d4d53110bd8bc21ebe78 100644
+--- a/components/bootstrappers/postgres/src/lib.rs
++++ b/components/bootstrappers/postgres/src/lib.rs
+@@ -67,10 +67,28 @@ pub use postgres::{
+ #[cfg(feature = "dynamic-plugin")]
+ drasi_plugin_sdk::export_plugin!(
+     plugin_id = "postgres-bootstrap",
+-    core_version = env!("CARGO_PKG_VERSION"),
+-    lib_version = env!("CARGO_PKG_VERSION"),
++    core_version = drasi_core::VERSION,
++    lib_version = drasi_lib::VERSION,
+     plugin_version = env!("CARGO_PKG_VERSION"),
+     source_descriptors = [],
+     reaction_descriptors = [],
+     bootstrap_descriptors = [descriptor::PostgresBootstrapDescriptor],
+ );
++
++#[cfg(all(test, feature = "dynamic-plugin"))]
++mod metadata_tests {
++    #[test]
++    fn exported_metadata_uses_dependency_versions() {
++        // The export returns immutable static metadata with static UTF-8 fields.
++        let metadata = unsafe { &*super::drasi_plugin_metadata() };
++        assert_eq!(
++            unsafe { metadata.core_version.as_str() },
++            drasi_core::VERSION
++        );
++        assert_eq!(unsafe { metadata.lib_version.as_str() }, drasi_lib::VERSION);
++        assert_eq!(
++            unsafe { metadata.plugin_version.as_str() },
++            env!("CARGO_PKG_VERSION")
++        );
++    }
++}
+diff --git a/components/sources/README.md b/components/sources/README.md
+index c40c347c80762ea7cca6d4a85ea80f5f6cb4bcef..6af9a86bf8101fb96959dac2afea5272f5c00047 100644
+--- a/components/sources/README.md
++++ b/components/sources/README.md
+@@ -2550,8 +2550,8 @@ pub mod descriptor;
+ #[cfg(feature = "dynamic-plugin")]
+ drasi_plugin_sdk::export_plugin!(
+     plugin_id = "my-source",
+-    core_version = "0.5.3",
+-    lib_version = "0.8.5",
++    core_version = drasi_core::VERSION,
++    lib_version = drasi_lib::VERSION,
+     plugin_version = env!("CARGO_PKG_VERSION"),
+     source_descriptors = [descriptor::MySourceDescriptor],
+     reaction_descriptors = [],
+@@ -2559,8 +2559,10 @@ drasi_plugin_sdk::export_plugin!(
+ );
+ ```
+ 
+-Set `core_version` and `lib_version` to the exact `drasi-core` and `drasi-lib`
+-versions used to build the plugin.
++Use the dependency-owned `drasi_core::VERSION` and `drasi_lib::VERSION` constants
++so metadata reports the actual linked versions. `env!("CARGO_PKG_VERSION")`
++belongs only in `plugin_version`; in this crate it reports the plugin's version,
++not either dependency's version.
+ 
+ If the crate also provides a bootstrap provider, implement
+ `BootstrapPluginDescriptor` and list it in `bootstrap_descriptors`.
+diff --git a/components/sources/postgres/src/lib.rs b/components/sources/postgres/src/lib.rs
+index 9e7d915a9b360be4ef8b38cccd42baa02aef0bc8..b0fb3133e211334085f1cee5aff462446ca974d0 100644
+--- a/components/sources/postgres/src/lib.rs
++++ b/components/sources/postgres/src/lib.rs
+@@ -2392,10 +2392,28 @@ mod tests {
+ #[cfg(feature = "dynamic-plugin")]
+ drasi_plugin_sdk::export_plugin!(
+     plugin_id = "postgres-source",
+-    core_version = env!("CARGO_PKG_VERSION"),
+-    lib_version = env!("CARGO_PKG_VERSION"),
++    core_version = drasi_core::VERSION,
++    lib_version = drasi_lib::VERSION,
+     plugin_version = env!("CARGO_PKG_VERSION"),
+     source_descriptors = [descriptor::PostgresSourceDescriptor],
+     reaction_descriptors = [],
+     bootstrap_descriptors = [],
+ );
++
++#[cfg(all(test, feature = "dynamic-plugin"))]
++mod metadata_tests {
++    #[test]
++    fn exported_metadata_uses_dependency_versions() {
++        // The export returns immutable static metadata with static UTF-8 fields.
++        let metadata = unsafe { &*super::drasi_plugin_metadata() };
++        assert_eq!(
++            unsafe { metadata.core_version.as_str() },
++            drasi_core::VERSION
++        );
++        assert_eq!(unsafe { metadata.lib_version.as_str() }, drasi_lib::VERSION);
++        assert_eq!(
++            unsafe { metadata.plugin_version.as_str() },
++            env!("CARGO_PKG_VERSION")
++        );
++    }
++}
+diff --git a/core/src/lib.rs b/core/src/lib.rs
+index 6a591008c8e59bb69092bca5be262f485ec5e09b..85811c0d905732c17ad2bd21aafcdaecaa10dd6a 100644
+--- a/core/src/lib.rs
++++ b/core/src/lib.rs
+@@ -20,3 +20,6 @@ pub mod middleware;
+ pub mod models;
+ pub mod path_solver;
+ pub mod query;
++
++/// Version of the query engine linked into this build.
++pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+diff --git a/lib/README.md b/lib/README.md
+index 23d6ca4023832f086682b230b77228d434b45c46..106516500ff5d1e35cd88f99fafcab664c8bab52 100644
+--- a/lib/README.md
++++ b/lib/README.md
+@@ -271,7 +271,7 @@ let config = Query::gql("active-orders")
+ | `with_dispatch_mode(DispatchMode)` | `Channel` (backpressure) or `Broadcast` (fanout) | `Channel` |
+ | `with_outbox_capacity(usize)` | Number of recent results retained for reaction replay | `1,000` |
+ | `with_storage_backend(StorageBackendRef)` | Persistent storage for this query | In-memory |
+-| `with_recovery_policy(RecoveryPolicy)` | Gap-recovery behavior for persistent queries (`Strict` fails on gap, `AutoReset` wipes + re-bootstraps) | `Strict` (via global default) |
++| `with_recovery_policy(RecoveryPolicy)` | Persistent startup/gap recovery: `Strict` fails on gaps, `AutoReset` rebuilds, `ExistingOnly` refuses initialization/reset | `Strict` (via global default) |
+ | `with_middleware(SourceMiddlewareConfig)` | Add middleware transformation | `[]` |
+ | `build() -> QueryConfig` | Build the configuration | — |
+ 
+@@ -980,6 +980,86 @@ downstream checkpoint consequences considered. The existing opt-in query
+ outbox is not a safe migration. This change performs no automatic migration and
+ does not change recovery policies.
+ 
++#### Recovering an Existing Persistent Query Without Reset
++
++Opt in when reopening a query whose state must not be recreated:
++
++```rust
++use drasi_lib::{Query, RecoveryPolicy, StorageBackendRef};
++
++let query = Query::cypher("q1")
++    .query("MATCH (n:Sensor) RETURN n.id, n.value")
++    .from_source("sensors")
++    .with_storage_backend(StorageBackendRef::Named("persistent".to_string()))
++    .with_recovery_policy(RecoveryPolicy::ExistingOnly)
++    .build();
++```
++
++`ExistingOnly` requires a persistent checkpoint store with an existing, readable,
++matching config hash. Missing/mismatched hashes (including incomplete-reset markers),
++checkpoint read errors, and unreadable or inconsistent durable output fail startup
++before reset, logical-state writes, or source subscription. Output is revalidated
++even on a same-process stop/start. An unchanged valid query retains its generation,
++live results, outbox, and source resume positions. An unavailable source position
++also fails without resetting; detecting it can require a subscription attempt.
++Backend opening may create physical files or empty databases, so this is a
++logical-state guarantee, not a read-only filesystem API.
++
++Create genuinely new queries with the default `Strict` policy (or `AutoReset`),
++then select `ExistingOnly` for recovery. Neither existing policy's behavior changes:
++`Strict` still initializes new queries and rebuilds on config-hash changes or read
++failures. A runtime-wide opt-in is available through
++`DrasiLib::builder().with_default_recovery_policy(RecoveryPolicy::ExistingOnly)`;
++per-query policies override it. JSON/YAML uses `recoveryPolicy: existing_only`.
++Recovery policy is not part of the persisted config hash.
++
++For a query already created under `Strict` or `AutoReset`, use the managed
++per-start operation instead of rebuilding the graph or changing its configuration:
++
++```rust
++// After stopping the query and observing ComponentStatus::Stopped:
++core.start_query_existing("q1").await?;
++```
++
++`DrasiLib::start_query_existing(&str)` and
++`core.query_manager().start_query_existing(String)` apply `ExistingOnly` only to
++that start. They reuse the existing runtime and normal graph transition validation,
++revalidate durable output even when it is already cached in RAM, and leave the
++configured policy unchanged for subsequent `start_query` calls. Sources can stay
++running. A failed start enters `Error`; use normal `stop_query`, observe `Stopped`,
++then retry after resolving the failure. Neither operation grants new-query
++creation authority or removes persistent state. Custom `Query` implementations
++must explicitly implement `start_existing`; its default rejects the operation
++rather than falling back to ordinary startup.
++
++Adding `ExistingOnly` extends the public `RecoveryPolicy` enum: downstream
++exhaustive matches must handle the new variant. No persisted data or plugin FFI
++layout changes are required.
++
++#### Retiring a Query Without Deleting Persistent State
++
++After normal `stop_query` has completed and `Stopped` has been observed:
++
++```rust
++core.remove_query_preserving_state("q1").await?;
++```
++
++This removes the query runtime and graph registration, evicts its cached labels
++and instance-scoped logs, and releases its persistent handles. Both graph and
++runtime must be `Stopped`, all owned tasks must be joined, and no dependents may
++remain. Active, failed, unknown, or unsupported custom runtimes are refused
++without removal; preparation and deregistration errors are returned.
++`core.query_manager().remove_query_preserving_state(String)` provides the same
++managed operation, including graph deregistration.
++
++All persistent index, checkpoint, outbox, live-result, sequence, and generation
++bytes are retained. Re-add the same ID, query identity, and backend using
++`RecoveryPolicy::ExistingOnly` with automatic start disabled, then call
++`start_query_existing` to recover them. Sources need not be stopped. Ordinary
++`remove_query` still clears persistent state; it is not a retirement operation.
++Custom `Query` implementations must explicitly support
++`prepare_for_removal_preserving_state`; its default rejects retirement.
++
+ ### Result Format
+ 
+ Reactions receive `QueryResult` values containing `ResultDiff` items:
+diff --git a/lib/src/builder.rs b/lib/src/builder.rs
+index a76ed66425564c2994f6e5b993f585e64e073481..d7bdda46e09479487566e580627957a1954404f7 100644
+--- a/lib/src/builder.rs
++++ b/lib/src/builder.rs
+@@ -964,8 +964,9 @@ impl Query {
+         self
+     }
+ 
+-    /// Set the recovery policy. Applies only to queries with a persistent
+-    /// storage backend. See [`RecoveryPolicy`](crate::RecoveryPolicy).
++    /// Set the startup and gap-recovery policy. `ExistingOnly` requires a
++    /// persistent backend and refuses to initialize or reset logical state.
++    /// See [`RecoveryPolicy`](crate::RecoveryPolicy).
+     pub fn with_recovery_policy(mut self, policy: crate::recovery::RecoveryPolicy) -> Self {
+         self.recovery_policy = Some(policy);
+         self
+diff --git a/lib/src/config/schema.rs b/lib/src/config/schema.rs
+index 4b639f8dc9521efe3fd329336602fac7c1221fbe..afcd6a5af3ffb4da8b0c6777986b66f429c97270 100644
+--- a/lib/src/config/schema.rs
++++ b/lib/src/config/schema.rs
+@@ -472,7 +472,8 @@ pub struct QueryConfig {
+     /// Can reference a named backend or provide inline configuration
+     #[serde(skip_serializing_if = "Option::is_none")]
+     pub storage_backend: Option<StorageBackendRef>,
+-    /// Recovery policy when a source cannot honor a requested resume position.
++    /// Startup and gap-recovery policy. `ExistingOnly` requires an existing
++    /// persistent query and refuses initialization or reset.
+     /// `None` inherits the global default (itself defaulting to `Strict`).
+     /// See [`RecoveryPolicy`](crate::RecoveryPolicy).
+     #[serde(
+diff --git a/lib/src/lib.rs b/lib/src/lib.rs
+index a2b693fcfa56fdf639813e87cecc5fb3c090af56..eac55abe48ef45b9cf9b71e4889915f4586f0795 100644
+--- a/lib/src/lib.rs
++++ b/lib/src/lib.rs
+@@ -140,6 +140,9 @@ pub use error::{DrasiError, Result};
+ /// Recovery policy and error types for checkpoint-based recovery
+ pub use recovery::{ReactionRecoveryPolicy, RecoveryError, RecoveryPolicy};
+ 
++/// Version of the embedded runtime linked into this build.
++pub const VERSION: &str = env!("CARGO_PKG_VERSION");
++
+ /// Component status type for monitoring component states
+ pub use channels::ComponentStatus;
+ 
+diff --git a/lib/src/lib_core_ops/query_ops.rs b/lib/src/lib_core_ops/query_ops.rs
+index e6bed674d9e951aa18832c8e3b8d07a4e0d3e2f9..5f46e4d40648b34693b6b9b9c314ab9f203bbe1a 100644
+--- a/lib/src/lib_core_ops/query_ops.rs
++++ b/lib/src/lib_core_ops/query_ops.rs
+@@ -120,6 +120,47 @@ impl DrasiLib {
+         Ok(())
+     }
+ 
++    /// Remove a stopped query from this instance without deleting its persistent
++    /// indexes, checkpoints, outbox, live results, sequence, or generation.
++    ///
++    /// Both graph and runtime must be `Stopped`, all owned work must have been
++    /// joined, and no dependents may remain. Stop the query normally and observe
++    /// `Stopped` first. Active, failed, unknown, and custom runtimes that do not
++    /// support safe retirement are refused without removal. Teardown and graph
++    /// deregistration failures are returned to the caller.
++    ///
++    /// The ID can then be re-added with the same query identity and backend and
++    /// recovered with [`Self::start_query_existing`] or `RecoveryPolicy::ExistingOnly`.
++    /// Ordinary [`Self::remove_query`] remains destructive.
++    ///
++    /// # Example
++    /// ```no_run
++    /// # use drasi_lib::DrasiLib;
++    /// # async fn example(core: &DrasiLib) -> Result<(), Box<dyn std::error::Error>> {
++    /// // Normal stop_query has completed and Stopped has been observed.
++    /// core.remove_query_preserving_state("my-query").await?;
++    /// # Ok(())
++    /// # }
++    /// ```
++    pub async fn remove_query_preserving_state(&self, id: &str) -> Result<()> {
++        self.state_guard.require_initialized()?;
++        self.query_manager
++            .get_query_config(id)
++            .await
++            .ok_or_else(|| DrasiError::component_not_found("query", id))?;
++        self.query_manager
++            .remove_query_preserving_state(id.to_string())
++            .await
++            .map_err(|error| {
++                DrasiError::operation_failed(
++                    "query",
++                    id,
++                    "remove_preserving_state",
++                    format!("{error:#}"),
++                )
++            })
++    }
++
+     /// Start a stopped query
+     ///
+     /// This will create the necessary subscriptions to source data streams.
+@@ -151,6 +192,47 @@ impl DrasiLib {
+         )
+     }
+ 
++    /// Start or restart an existing persistent query without initializing or
++    /// resetting its logical state, regardless of its configured recovery policy.
++    ///
++    /// Applies [`crate::RecoveryPolicy::ExistingOnly`] to this start only. Missing,
++    /// mismatched, unreadable, or inconsistent persisted state fails startup.
++    /// The query runtime, graph, and configured policy are not replaced. Sources
++    /// may remain running while the query is stopped and restarted.
++    ///
++    /// Uses the same lifecycle validation and error cleanup as [`Self::start_query`].
++    /// On failure, stop the failed query normally before retrying. This is not
++    /// creation authority: a new query must first be started with `start_query`.
++    /// After stopping, observe `Stopped` through status inspection or component
++    /// events before starting again.
++    ///
++    /// # Example
++    /// ```no_run
++    /// # use drasi_lib::DrasiLib;
++    /// # async fn example(core: &DrasiLib) -> Result<(), Box<dyn std::error::Error>> {
++    /// // The existing query has been stopped and Stopped has been observed.
++    /// core.start_query_existing("my-query").await?;
++    /// # Ok(())
++    /// # }
++    /// ```
++    pub async fn start_query_existing(&self, id: &str) -> Result<()> {
++        self.state_guard.require_initialized()?;
++
++        self.query_manager
++            .get_query_config(id)
++            .await
++            .ok_or_else(|| DrasiError::component_not_found("query", id))?;
++
++        map_component_error(
++            self.query_manager
++                .start_query_existing(id.to_string())
++                .await,
++            "query",
++            id,
++            "start",
++        )
++    }
++
+     /// Stop a running, starting, or failed query.
+     ///
+     /// Queries in `Error` may still own subscriptions and processing tasks. This
+@@ -516,6 +598,24 @@ mod tests {
+         );
+     }
+ 
++    #[tokio::test]
++    async fn preserved_removal_refuses_unknown_wrong_kind_and_shutdown() {
++        let core = build_core_with_source().await;
++        for id in ["missing-query", "test-source", "test"] {
++            assert!(matches!(
++                core.remove_query_preserving_state(id).await,
++                Err(DrasiError::ComponentNotFound { .. })
++            ));
++        }
++        assert!(core.component_graph().read().await.contains("test-source"));
++        assert!(core.component_graph().read().await.contains("test"));
++        core.shutdown().await.unwrap();
++        assert!(matches!(
++            core.remove_query_preserving_state("missing-query").await,
++            Err(DrasiError::ComponentNotFound { .. })
++        ));
++    }
++
+     // ========================================================================
+     // list_queries
+     // ========================================================================
+@@ -627,6 +727,21 @@ mod tests {
+         assert_eq!(status, ComponentStatus::Stopped);
+     }
+ 
++    #[tokio::test]
++    async fn start_query_existing_preserves_public_error_boundaries() {
++        let core = build_core_with_source().await;
++        assert!(matches!(
++            core.start_query_existing("missing").await,
++            Err(DrasiError::ComponentNotFound { .. })
++        ));
++        core.shutdown().await.unwrap();
++        let error = core.start_query_existing("missing").await.unwrap_err();
++        assert_eq!(
++            error.to_string(),
++            core.start_query("missing").await.unwrap_err().to_string()
++        );
++    }
++
+     // ========================================================================
+     // get_query_config
+     // ========================================================================
+diff --git a/lib/src/managers/lifecycle_helpers.rs b/lib/src/managers/lifecycle_helpers.rs
+index e7d75b1f40868271776ebd320dac428948d487ff..b7ad6cecb72015069fd20c6f5eef6413ae96a586 100644
+--- a/lib/src/managers/lifecycle_helpers.rs
++++ b/lib/src/managers/lifecycle_helpers.rs
+@@ -151,6 +151,16 @@ pub async fn start_component<R: ComponentRuntime>(
+     id: &str,
+     component_type: &str,
+     runtime: &R,
++) -> Result<()> {
++    start_component_with(graph, id, component_type, || runtime.start()).await
++}
++
++/// Run a selected start operation through the normal managed lifecycle.
++pub(crate) async fn start_component_with<Fut: Future<Output = Result<()>>>(
++    graph: &Arc<RwLock<ComponentGraph>>,
++    id: &str,
++    component_type: &str,
++    start: impl FnOnce() -> Fut,
+ ) -> Result<()> {
+     // Validate and apply Starting transition atomically through the graph
+     {
+@@ -162,7 +172,7 @@ pub async fn start_component<R: ComponentRuntime>(
+         )?;
+     }
+ 
+-    if let Err(e) = runtime.start().await {
++    if let Err(e) = start().await {
+         // Revert graph status so the component isn't stuck at Starting
+         let mut g = graph.write().await;
+         let _ = g.validate_and_transition(
+diff --git a/lib/src/queries/base.rs b/lib/src/queries/base.rs
+index cadeebc8de339192b939afc0e5ba11f90dda220d..f84ce5abb985fe5c9881b351665a861633882d58 100644
+--- a/lib/src/queries/base.rs
++++ b/lib/src/queries/base.rs
+@@ -214,7 +214,18 @@ impl QueryBase {
+     /// Handle common stop functionality.
+     pub async fn stop_common(&self) -> Result<()> {
+         info!("Stopping query '{}'", self.config.id);
++        self.stop_task().await?;
+ 
++        self.set_status(
++            ComponentStatus::Stopped,
++            Some(format!("Query '{}' stopped", self.config.id)),
++        )
++        .await;
++        info!("Query '{}' stopped", self.config.id);
++        Ok(())
++    }
++
++    pub(crate) async fn stop_task(&self) -> Result<()> {
+         // Send shutdown signal if we have one
+         if let Some(tx) = self.shutdown_tx.write().await.take() {
+             let _ = tx.send(());
+@@ -235,16 +246,15 @@ impl QueryBase {
+                         self.config.id
+                     );
+                     handle.abort();
++                    if let Err(e) = handle.await {
++                        if !e.is_cancelled() {
++                            error!("Query '{}' task panicked during abort: {e}", self.config.id);
++                        }
++                    }
+                 }
+             }
+         }
+ 
+-        self.set_status(
+-            ComponentStatus::Stopped,
+-            Some(format!("Query '{}' stopped", self.config.id)),
+-        )
+-        .await;
+-        info!("Query '{}' stopped", self.config.id);
+         Ok(())
+     }
+ 
+@@ -510,6 +520,31 @@ mod tests {
+         );
+     }
+ 
++    #[tokio::test]
++    async fn test_stop_common_joins_aborted_processor_before_stopped() {
++        struct TaskExit(Arc<AtomicBool>);
++        impl Drop for TaskExit {
++            fn drop(&mut self) {
++                self.0.store(true, Ordering::SeqCst);
++            }
++        }
++        let base = QueryBase::new(test_config("joined-stop", None)).unwrap();
++        let exited = Arc::new(AtomicBool::new(false));
++        let guard = TaskExit(exited.clone());
++        base.set_task_handle(tokio::spawn(async move {
++            let _guard = guard;
++            std::future::pending::<()>().await;
++        }))
++        .await;
++        tokio::task::yield_now().await;
++        base.stop_common().await.unwrap();
++        assert!(
++            exited.load(Ordering::SeqCst),
++            "Stopped must mean task resources have been dropped"
++        );
++        assert_eq!(base.get_status().await, ComponentStatus::Stopped);
++    }
++
+     #[tokio::test]
+     async fn test_query_base_broadcast_mode() {
+         let config = QueryConfig {
+diff --git a/lib/src/queries/config_hash.rs b/lib/src/queries/config_hash.rs
+index f78119103b12c55df367fd7d58cc4d174f01514a..f02b554b76c817b004ac14683884e9f04a075dd2 100644
+--- a/lib/src/queries/config_hash.rs
++++ b/lib/src/queries/config_hash.rs
+@@ -16,11 +16,13 @@
+ //!
+ //! On query restart with a persistent index, we compare a hash of the query's
+ //! identity-defining config against the hash stored alongside the index. A
+-//! mismatch triggers an automatic wipe + re-bootstrap
++//! mismatch triggers an automatic wipe + re-bootstrap unless `ExistingOnly`
++//! recovery is selected, in which case startup fails without changing state
+ //! (see design doc 02 §3 — Reading Checkpoints on Startup).
+ //!
+ //! Source ordering ranks are part of the identity. Hashes written before ranks
+-//! were included will mismatch once, triggering a full re-bootstrap on upgrade.
++//! were included will mismatch once, triggering a full re-bootstrap on upgrade
++//! (or failing startup under `ExistingOnly`).
+ //!
+ //! We use `fnv` rather than `std::hash::DefaultHasher` because `DefaultHasher`
+ //! is explicitly documented as unstable across Rust versions — upgrading the
+diff --git a/lib/src/queries/e2e_checkpoint_tests.rs b/lib/src/queries/e2e_checkpoint_tests.rs
+index f9b36fe63e26c982bcb8508518ca546c1fa412a7..9581ccf06a0d49bd8b8b186777583a8142e56576 100644
+--- a/lib/src/queries/e2e_checkpoint_tests.rs
++++ b/lib/src/queries/e2e_checkpoint_tests.rs
+@@ -35,12 +35,211 @@ use crate::channels::events::SourceEventWrapper;
+ use crate::channels::{ChannelChangeReceiver, ComponentStatus, SubscriptionResponse};
+ use crate::config::{QueryConfig, SourceSubscriptionSettings};
+ use crate::context::SourceRuntimeContext;
+-use crate::indexes::{IndexBackendPlugin, StorageBackendRef};
++use crate::indexes::{CreatedIndexes, IndexBackendPlugin, StorageBackendRef};
+ use crate::sources::{Source, SourceBase, SourceBaseParams, SourceError};
+ use crate::{DrasiLib, Query, RecoveryPolicy};
+ 
++use drasi_core::interface::{CheckpointStore, IndexError, SourceCheckpoint};
+ use drasi_index_rocksdb::RocksDbIndexProvider;
+ 
++#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
++enum RecoveryReadFailure {
++    #[default]
++    None,
++    ConfigHash,
++    Checkpoints,
++    ResultSequence,
++    OutputGeneration,
++    InconsistentSequence,
++}
++
++struct RecoveryTestProvider {
++    inner: RocksDbIndexProvider,
++    failure: Arc<std::sync::Mutex<RecoveryReadFailure>>,
++}
++
++#[async_trait]
++impl IndexBackendPlugin for RecoveryTestProvider {
++    async fn create_indexes(&self, query_id: &str) -> Result<CreatedIndexes, IndexError> {
++        let mut created = self.inner.create_indexes(query_id).await?;
++        created.checkpoint_store = Some(Arc::new(RecoveryTestCheckpoints {
++            inner: created
++                .checkpoint_store
++                .take()
++                .expect("RocksDB checkpoints"),
++            failure: self.failure.clone(),
++        }));
++        Ok(created)
++    }
++
++    fn is_volatile(&self) -> bool {
++        false
++    }
++}
++
++struct RecoveryTestCheckpoints {
++    inner: Arc<dyn CheckpointStore>,
++    failure: Arc<std::sync::Mutex<RecoveryReadFailure>>,
++}
++
++impl RecoveryTestCheckpoints {
++    fn check(&self, operation: RecoveryReadFailure) -> Result<(), IndexError> {
++        if *self.failure.lock().unwrap() == operation {
++            return Err(IndexError::other(std::io::Error::other(format!(
++                "injected {operation:?} read failure"
++            ))));
++        }
++        Ok(())
++    }
++}
++
++#[async_trait]
++impl CheckpointStore for RecoveryTestCheckpoints {
++    fn is_persistent(&self) -> bool {
++        self.inner.is_persistent()
++    }
++
++    async fn stage_checkpoint(
++        &self,
++        source_id: &str,
++        sequence: u64,
++        position: Option<&Bytes>,
++    ) -> Result<(), IndexError> {
++        self.inner
++            .stage_checkpoint(source_id, sequence, position)
++            .await
++    }
++
++    async fn read_checkpoint(
++        &self,
++        source_id: &str,
++    ) -> Result<Option<SourceCheckpoint>, IndexError> {
++        self.inner.read_checkpoint(source_id).await
++    }
++
++    async fn read_all_checkpoints(&self) -> Result<HashMap<String, SourceCheckpoint>, IndexError> {
++        self.check(RecoveryReadFailure::Checkpoints)?;
++        self.inner.read_all_checkpoints().await
++    }
++
++    async fn clear_checkpoints(&self) -> Result<(), IndexError> {
++        self.inner.clear_checkpoints().await
++    }
++
++    async fn write_config_hash(&self, hash: u64) -> Result<(), IndexError> {
++        self.inner.write_config_hash(hash).await
++    }
++
++    async fn read_config_hash(&self) -> Result<Option<u64>, IndexError> {
++        self.check(RecoveryReadFailure::ConfigHash)?;
++        self.inner.read_config_hash().await
++    }
++
++    async fn stage_result_sequence(&self, query_id: &str, sequence: u64) -> Result<(), IndexError> {
++        self.inner.stage_result_sequence(query_id, sequence).await
++    }
++
++    async fn write_result_sequence(&self, query_id: &str, sequence: u64) -> Result<(), IndexError> {
++        self.inner.write_result_sequence(query_id, sequence).await
++    }
++
++    async fn read_result_sequence(&self, query_id: &str) -> Result<Option<u64>, IndexError> {
++        self.check(RecoveryReadFailure::ResultSequence)?;
++        if *self.failure.lock().unwrap() == RecoveryReadFailure::InconsistentSequence {
++            return Ok(Some(0));
++        }
++        self.inner.read_result_sequence(query_id).await
++    }
++
++    async fn write_output_generation(
++        &self,
++        query_id: &str,
++        generation: u64,
++    ) -> Result<(), IndexError> {
++        self.inner
++            .write_output_generation(query_id, generation)
++            .await
++    }
++
++    async fn read_output_generation(&self, query_id: &str) -> Result<Option<u64>, IndexError> {
++        self.check(RecoveryReadFailure::OutputGeneration)?;
++        self.inner.read_output_generation(query_id).await
++    }
++}
++
++type LogicalRocksState = std::collections::BTreeMap<String, Vec<(Vec<u8>, Vec<u8>)>>;
++
++struct RetirementTestQuery {
++    inner: Arc<dyn super::Query>,
++    reported_status: Option<ComponentStatus>,
++    fail_prepare: bool,
++}
++
++#[async_trait]
++impl super::Query for RetirementTestQuery {
++    async fn start(&self) -> anyhow::Result<()> {
++        self.inner.start().await
++    }
++    async fn stop(&self) -> anyhow::Result<()> {
++        self.inner.stop().await
++    }
++    async fn status(&self) -> ComponentStatus {
++        match self.reported_status {
++            Some(status) => status,
++            None => self.inner.status().await,
++        }
++    }
++    fn get_config(&self) -> &QueryConfig {
++        self.inner.get_config()
++    }
++    fn as_any(&self) -> &dyn std::any::Any {
++        self
++    }
++    async fn subscribe(
++        &self,
++        id: String,
++    ) -> anyhow::Result<crate::channels::QuerySubscriptionResponse> {
++        self.inner.subscribe(id).await
++    }
++    async fn fetch_snapshot(&self) -> Result<super::SnapshotResponse, super::FetchError> {
++        self.inner.fetch_snapshot().await
++    }
++    async fn fetch_outbox(&self, after: u64) -> Result<super::OutboxResponse, super::FetchError> {
++        self.inner.fetch_outbox(after).await
++    }
++    async fn prepare_for_removal_preserving_state(&self) -> anyhow::Result<()> {
++        if self.fail_prepare {
++            anyhow::bail!("injected retirement preparation failure");
++        }
++        self.inner.prepare_for_removal_preserving_state().await
++    }
++}
++
++fn logical_rocks_state(path: &std::path::Path, query_id: &str) -> LogicalRocksState {
++    use drasi_index_rocksdb::{open_unified_db, IndexDb, RocksIndexOptions};
++
++    let cfs = IndexDb::list_cf(&Default::default(), path.join(query_id)).unwrap();
++    let options = RocksIndexOptions::new(false, false, Default::default());
++    let db = open_unified_db(path.to_str().unwrap(), query_id, &options).unwrap();
++    cfs.into_iter()
++        .map(|name| {
++            let cf = db.cf_handle(&name).unwrap();
++            let mut iterator = db.raw_iterator_cf(&cf);
++            iterator.seek_to_first();
++            let mut entries = Vec::new();
++            while iterator.valid() {
++                entries.push((
++                    iterator.key().unwrap().to_vec(),
++                    iterator.value().unwrap().to_vec(),
++                ));
++                iterator.next();
++            }
++            iterator.status().unwrap();
++            (name, entries)
++        })
++        .collect()
++}
++
+ // ============================================================================
+ // E2E test source
+ // ============================================================================
+@@ -354,12 +553,574 @@ async fn wait_for_outbox_sequence(
+ // ============================================================================
+ 
+ #[rstest::rstest]
+-#[case::insert_only(1, false)]
+-#[case::named_update(2, false)]
+-#[case::malformed_legacy_update(2, true)]
++#[case::hash_read(RecoveryReadFailure::ConfigHash, "none", "injected ConfigHash")]
++#[case::checkpoints_read(RecoveryReadFailure::Checkpoints, "none", "injected Checkpoints")]
++#[case::sequence_read(RecoveryReadFailure::ResultSequence, "none", "injected ResultSequence")]
++#[case::generation_read(
++    RecoveryReadFailure::OutputGeneration,
++    "none",
++    "injected OutputGeneration"
++)]
++#[case::missing_hash(RecoveryReadFailure::None, "missing_hash", "no stored config hash")]
++#[case::changed_config(RecoveryReadFailure::None, "changed_config", "config hash")]
++#[case::reset_marker(RecoveryReadFailure::None, "reset_marker", "config hash")]
++#[case::corrupt_outbox(RecoveryReadFailure::None, "corrupt_outbox", "inconsistent")]
++#[case::inconsistent_sequence(RecoveryReadFailure::None, "inconsistent_sequence", "inconsistent")]
++#[case::unavailable_position(
++    RecoveryReadFailure::None,
++    "position_unavailable",
++    "PositionUnavailable"
++)]
++#[tokio::test]
++#[serial]
++async fn test_e2e_existing_only_failure_preserves_rocksdb(
++    #[case] failure: RecoveryReadFailure,
++    #[case] damage: &str,
++    #[case] expected_error: &str,
++) {
++    let tmp = tempfile::TempDir::new().unwrap();
++    let core = build_e2e_lib("existing-only", &tmp, None).await.unwrap();
++    let source = E2eTestSource::new("recovery-src", true).unwrap();
++    let events = source.event_sender();
++    core.add_source(source).await.unwrap();
++    core.add_query(make_persistent_query("recovery-q", "recovery-src", None))
++        .await
++        .unwrap();
++    core.start().await.unwrap();
++    core.start_source("recovery-src").await.unwrap();
++    core.start_query("recovery-q").await.unwrap();
++    send_event(&events, "recovery-src", 1, b"durable-position").await;
++    wait_for_outbox_sequence(&core, "recovery-q", 1).await;
++    core.shutdown().await.unwrap();
++    drop(core);
++
++    let mut config = make_persistent_query(
++        "recovery-q",
++        "recovery-src",
++        Some(RecoveryPolicy::ExistingOnly),
++    );
++    {
++        let provider = RocksDbIndexProvider::new(tmp.path(), false, false);
++        let indexes = provider.create_indexes("recovery-q").await.unwrap();
++        let store = indexes.checkpoint_store.as_ref().unwrap();
++        store
++            .write_output_generation("recovery-q", 7)
++            .await
++            .unwrap();
++        match damage {
++            "missing_hash" => store.clear_checkpoints().await.unwrap(),
++            "changed_config" => config.query.push(' '),
++            "reset_marker" => store
++                .write_config_hash(!super::compute_config_hash(&config))
++                .await
++                .unwrap(),
++            "corrupt_outbox" => indexes
++                .outbox_writer
++                .as_ref()
++                .unwrap()
++                .append("recovery-q", 1, b"not MessagePack")
++                .await
++                .unwrap(),
++            "inconsistent_sequence" => store.write_result_sequence("recovery-q", 0).await.unwrap(),
++            "none" | "position_unavailable" => {}
++            other => panic!("unknown damage: {other}"),
++        }
++    }
++    let before = logical_rocks_state(tmp.path(), "recovery-q");
++    assert!(before.values().any(|entries| !entries.is_empty()));
++    let provider = RecoveryTestProvider {
++        inner: RocksDbIndexProvider::new(tmp.path(), false, false),
++        failure: Arc::new(std::sync::Mutex::new(failure)),
++    };
++    let reopened = DrasiLib::builder()
++        .with_id("existing-only")
++        .with_index_provider("persistent", Arc::new(provider))
++        .build()
++        .await
++        .unwrap();
++    let source = E2eTestSource::new("recovery-src", true).unwrap();
++    let subscriptions = source.subscribe_count_handle();
++    if damage == "position_unavailable" {
++        source.set_fail_count(1);
++    }
++    reopened.add_source(source).await.unwrap();
++    reopened.add_query(config).await.unwrap();
++    reopened.start().await.unwrap();
++    reopened.start_source("recovery-src").await.unwrap();
++    let error = reopened
++        .start_query("recovery-q")
++        .await
++        .expect_err("recovery must fail closed");
++    let message = format!("{error:#}");
++    assert!(message.contains(expected_error), "{message}");
++    assert_eq!(
++        subscriptions.load(Ordering::Acquire),
++        u32::from(damage == "position_unavailable"),
++        "{message}"
++    );
++    wait_for_status(&reopened, "recovery-q", ComponentStatus::Error).await;
++    reopened.shutdown().await.unwrap();
++    drop(reopened);
++    assert_eq!(
++        logical_rocks_state(tmp.path(), "recovery-q"),
++        before,
++        "failed recovery must preserve every logical RocksDB column family"
++    );
++}
++
++#[rstest::rstest]
++#[case::hash_read(RecoveryReadFailure::ConfigHash)]
++#[case::checkpoints_read(RecoveryReadFailure::Checkpoints)]
++#[case::sequence_read(RecoveryReadFailure::ResultSequence)]
++#[case::generation_read(RecoveryReadFailure::OutputGeneration)]
++#[case::inconsistent_output(RecoveryReadFailure::InconsistentSequence)]
++#[tokio::test]
++#[serial]
++async fn test_e2e_existing_only_warm_restart_validates_before_subscribing(
++    #[case] failure: RecoveryReadFailure,
++) {
++    let tmp = tempfile::TempDir::new().unwrap();
++    let core = build_e2e_lib("warm-recovery", &tmp, None).await.unwrap();
++    let source = E2eTestSource::new("warm-src", true).unwrap();
++    let events = source.event_sender();
++    core.add_source(source).await.unwrap();
++    core.add_query(make_persistent_query("warm-q", "warm-src", None))
++        .await
++        .unwrap();
++    core.start().await.unwrap();
++    core.start_source("warm-src").await.unwrap();
++    core.start_query("warm-q").await.unwrap();
++    send_event(&events, "warm-src", 1, b"warm-position").await;
++    let original = wait_for_outbox_sequence(&core, "warm-q", 1).await;
++    core.shutdown().await.unwrap();
++    drop(core);
++    {
++        let provider = RocksDbIndexProvider::new(tmp.path(), false, false);
++        let indexes = provider.create_indexes("warm-q").await.unwrap();
++        indexes
++            .checkpoint_store
++            .as_ref()
++            .unwrap()
++            .write_output_generation("warm-q", 7)
++            .await
++            .unwrap();
++    }
++    let before = logical_rocks_state(tmp.path(), "warm-q");
++    let injected = Arc::new(std::sync::Mutex::new(RecoveryReadFailure::None));
++    let reopened = DrasiLib::builder()
++        .with_id("warm-recovery")
++        .with_default_recovery_policy(RecoveryPolicy::ExistingOnly)
++        .with_index_provider(
++            "persistent",
++            Arc::new(RecoveryTestProvider {
++                inner: RocksDbIndexProvider::new(tmp.path(), false, false),
++                failure: injected.clone(),
++            }),
++        )
++        .build()
++        .await
++        .unwrap();
++    let source = E2eTestSource::new("warm-src", true).unwrap();
++    let subscriptions = source.subscribe_count_handle();
++    let resume_from = source.last_resume_from();
++    let resume_sequence = source.last_resume_sequence();
++    reopened.add_source(source).await.unwrap();
++    reopened
++        .add_query(make_persistent_query("warm-q", "warm-src", None))
++        .await
++        .unwrap();
++    reopened.start().await.unwrap();
++    reopened.start_source("warm-src").await.unwrap();
++    reopened.start_query("warm-q").await.unwrap();
++    reopened.stop_query("warm-q").await.unwrap();
++    wait_for_status(&reopened, "warm-q", ComponentStatus::Stopped).await;
++    *injected.lock().unwrap() = failure;
++    reopened
++        .start_query("warm-q")
++        .await
++        .expect_err("warm recovery must revalidate");
++    assert_eq!(subscriptions.load(Ordering::Acquire), 1);
++    wait_for_status(&reopened, "warm-q", ComponentStatus::Error).await;
++    reopened.stop_query("warm-q").await.unwrap();
++    wait_for_status(&reopened, "warm-q", ComponentStatus::Stopped).await;
++    *injected.lock().unwrap() = RecoveryReadFailure::None;
++    reopened.start_query("warm-q").await.unwrap();
++    assert_eq!(subscriptions.load(Ordering::Acquire), 2);
++    assert_eq!(
++        *resume_from.read().await,
++        Some(Bytes::from_static(b"warm-position"))
++    );
++    assert_eq!(*resume_sequence.read().await, Some(1));
++    let query = reopened
++        .query_manager()
++        .get_query_instance("warm-q")
++        .await
++        .unwrap();
++    let outbox = query.fetch_outbox(0).await.unwrap();
++    assert_eq!(outbox.output_generation, 7);
++    assert_eq!(outbox.latest_sequence, original.latest_sequence);
++    assert_eq!(outbox.results[0].results, original.results[0].results);
++    assert_eq!(
++        query.fetch_snapshot().await.unwrap().to_vec(),
++        vec![serde_json::json!({"id": "node-1", "value": 1})]
++    );
++    drop(query);
++    reopened.shutdown().await.unwrap();
++    drop(reopened);
++    assert_eq!(logical_rocks_state(tmp.path(), "warm-q"), before);
++}
++
++#[rstest::rstest]
++#[case::persistent_config(true, false)]
++#[case::volatile_config(false, false)]
++#[case::persistent_start_existing(true, true)]
++#[case::volatile_start_existing(false, true)]
+ #[tokio::test]
+ #[serial]
+-async fn test_e2e_outbox_persistent_reopen(#[case] sequence: u64, #[case] legacy_compact: bool) {
++async fn test_e2e_existing_only_rejects_new_query(
++    #[case] persistent: bool,
++    #[case] per_start: bool,
++) {
++    let tmp = tempfile::TempDir::new().unwrap();
++    let provider = RocksDbIndexProvider::new(tmp.path(), false, false);
++    let before = if persistent {
++        drop(provider.create_indexes("new-q").await.unwrap());
++        Some(logical_rocks_state(tmp.path(), "new-q"))
++    } else {
++        None
++    };
++    let core = DrasiLib::builder()
++        .with_default_recovery_policy(RecoveryPolicy::AutoReset)
++        .with_index_provider("persistent", Arc::new(provider))
++        .build()
++        .await
++        .unwrap();
++    let source = E2eTestSource::new("new-src", true).unwrap();
++    let subscriptions = source.subscribe_count_handle();
++    core.add_source(source).await.unwrap();
++    let policy = if per_start {
++        RecoveryPolicy::Strict
++    } else {
++        RecoveryPolicy::ExistingOnly
++    };
++    let mut config = make_persistent_query("new-q", "new-src", Some(policy));
++    if !persistent {
++        config.storage_backend = None;
++    }
++    core.add_query(config).await.unwrap();
++    core.start().await.unwrap();
++    core.start_source("new-src").await.unwrap();
++    let result = if per_start {
++        core.start_query_existing("new-q").await
++    } else {
++        core.start_query("new-q").await
++    };
++    let error = result.expect_err("must not create a query");
++    assert!(format!("{error:#}").contains(if persistent {
++        "no stored config hash"
++    } else {
++        "persistent checkpoint store"
++    }));
++    assert_eq!(subscriptions.load(Ordering::Acquire), 0);
++    core.shutdown().await.unwrap();
++    drop(core);
++    if let Some(before) = before {
++        assert_eq!(logical_rocks_state(tmp.path(), "new-q"), before);
++    }
++}
++
++#[rstest::rstest]
++#[case::hash_read(RecoveryReadFailure::ConfigHash, "none", "injected ConfigHash")]
++#[case::checkpoints_read(RecoveryReadFailure::Checkpoints, "none", "injected Checkpoints")]
++#[case::sequence_read(RecoveryReadFailure::ResultSequence, "none", "injected ResultSequence")]
++#[case::generation_read(
++    RecoveryReadFailure::OutputGeneration,
++    "none",
++    "injected OutputGeneration"
++)]
++#[case::missing_hash(RecoveryReadFailure::None, "missing_hash", "no stored config hash")]
++#[case::mismatched_hash(RecoveryReadFailure::None, "mismatched_hash", "config hash mismatch")]
++#[case::reset_marker(RecoveryReadFailure::None, "reset_marker", "config hash mismatch")]
++#[case::corrupt_outbox(RecoveryReadFailure::None, "corrupt_outbox", "inconsistent")]
++#[case::inconsistent_sequence(RecoveryReadFailure::None, "inconsistent_sequence", "inconsistent")]
++#[case::unavailable_position(
++    RecoveryReadFailure::None,
++    "position_unavailable",
++    "PositionUnavailable"
++)]
++#[tokio::test]
++#[serial]
++async fn test_e2e_start_existing_after_strict_creation_fails_closed(
++    #[case] failure: RecoveryReadFailure,
++    #[case] damage: &str,
++    #[case] expected_error: &str,
++) {
++    let tmp = tempfile::TempDir::new().unwrap();
++    let injected = Arc::new(std::sync::Mutex::new(RecoveryReadFailure::None));
++    let provider = RecoveryTestProvider {
++        inner: RocksDbIndexProvider::new(tmp.path(), false, false),
++        failure: injected.clone(),
++    };
++    let core = DrasiLib::builder()
++        .with_index_provider("persistent", Arc::new(provider))
++        .build()
++        .await
++        .unwrap();
++    let source = E2eTestSource::new("managed-src", true).unwrap();
++    let events = source.event_sender();
++    let resume_from = source.last_resume_from();
++    let resume_sequence = source.last_resume_sequence();
++    let subscriptions = source.subscribe_count_handle();
++    let remaining_failures = source.remaining_failures_handle();
++    core.add_source(source).await.unwrap();
++    let config = make_persistent_query("managed-q", "managed-src", Some(RecoveryPolicy::Strict));
++    core.add_query(config.clone()).await.unwrap();
++    core.start().await.unwrap();
++    core.start_source("managed-src").await.unwrap();
++    core.start_query("managed-q").await.unwrap();
++    send_event(&events, "managed-src", 1, b"managed-position").await;
++    let original = wait_for_outbox_sequence(&core, "managed-q", 1).await;
++    let runtime = core
++        .query_manager()
++        .get_query_instance("managed-q")
++        .await
++        .unwrap();
++    core.stop_query("managed-q").await.unwrap();
++    wait_for_status(&core, "managed-q", ComponentStatus::Stopped).await;
++    runtime.release_persistent_handles().await;
++    {
++        let provider = RocksDbIndexProvider::new(tmp.path(), false, false);
++        let indexes = provider.create_indexes("managed-q").await.unwrap();
++        let store = indexes.checkpoint_store.as_ref().unwrap();
++        match damage {
++            "missing_hash" => store.clear_checkpoints().await.unwrap(),
++            "mismatched_hash" => store.write_config_hash(0).await.unwrap(),
++            "reset_marker" => store
++                .write_config_hash(!super::compute_config_hash(&config))
++                .await
++                .unwrap(),
++            "corrupt_outbox" => indexes
++                .outbox_writer
++                .as_ref()
++                .unwrap()
++                .append("managed-q", 1, b"not MessagePack")
++                .await
++                .unwrap(),
++            "inconsistent_sequence" => store.write_result_sequence("managed-q", 0).await.unwrap(),
++            "none" | "position_unavailable" => {}
++            other => panic!("unknown damage: {other}"),
++        }
++    }
++    let before = logical_rocks_state(tmp.path(), "managed-q");
++    *injected.lock().unwrap() = failure;
++    if damage == "position_unavailable" {
++        remaining_failures.store(1, Ordering::Release);
++    }
++    let error = core
++        .start_query_existing("managed-q")
++        .await
++        .expect_err("warm existing-state start must fail closed");
++    let message = format!("{error:#}");
++    assert!(message.contains(expected_error), "{message}");
++    wait_for_status(&core, "managed-q", ComponentStatus::Error).await;
++    assert_eq!(
++        subscriptions.load(Ordering::Acquire),
++        1 + u32::from(damage == "position_unavailable")
++    );
++    assert_eq!(runtime.subscription_count().await, 0);
++    assert_eq!(
++        runtime.output_generation().await,
++        original.output_generation
++    );
++    assert!(Arc::ptr_eq(
++        &runtime,
++        &core
++            .query_manager()
++            .get_query_instance("managed-q")
++            .await
++            .unwrap()
++    ));
++    assert_eq!(
++        core.get_source_status("managed-src").await.unwrap(),
++        ComponentStatus::Running
++    );
++    assert_eq!(
++        core.get_query_config("managed-q")
++            .await
++            .unwrap()
++            .recovery_policy,
++        Some(RecoveryPolicy::Strict)
++    );
++    core.stop_query("managed-q").await.unwrap();
++    wait_for_status(&core, "managed-q", ComponentStatus::Stopped).await;
++    runtime.release_persistent_handles().await;
++    assert_eq!(
++        logical_rocks_state(tmp.path(), "managed-q"),
++        before,
++        "failed warm admission must preserve every logical column family"
++    );
++    if damage == "none" || damage == "position_unavailable" {
++        *injected.lock().unwrap() = RecoveryReadFailure::None;
++        core.start_query_existing("managed-q").await.unwrap();
++        let output = runtime.fetch_outbox(0).await.unwrap();
++        assert_eq!(output.latest_sequence, original.latest_sequence);
++        assert_eq!(output.output_generation, original.output_generation);
++        assert_eq!(output.results[0].results, original.results[0].results);
++        assert_eq!(
++            *resume_from.read().await,
++            Some(Bytes::from_static(b"managed-position"))
++        );
++        assert_eq!(*resume_sequence.read().await, Some(1));
++        assert_eq!(
++            runtime.fetch_snapshot().await.unwrap().to_vec(),
++            vec![serde_json::json!({"id": "node-1", "value": 1})]
++        );
++    }
++    core.shutdown().await.unwrap();
++}
++
++#[rstest::rstest]
++#[case::strict_public(RecoveryPolicy::Strict, false)]
++#[case::auto_reset_manager(RecoveryPolicy::AutoReset, true)]
++#[tokio::test]
++#[serial]
++async fn test_e2e_start_existing_preserves_warm_runtime_and_configured_policy(
++    #[case] configured_policy: RecoveryPolicy,
++    #[case] manager_api: bool,
++) {
++    let tmp = tempfile::TempDir::new().unwrap();
++    let injected = Arc::new(std::sync::Mutex::new(RecoveryReadFailure::None));
++    let core = DrasiLib::builder()
++        .with_index_provider(
++            "persistent",
++            Arc::new(RecoveryTestProvider {
++                inner: RocksDbIndexProvider::new(tmp.path(), false, false),
++                failure: injected.clone(),
++            }),
++        )
++        .build()
++        .await
++        .unwrap();
++    let source = E2eTestSource::new("warm-managed-src", true).unwrap();
++    let events = source.event_sender();
++    let subscriptions = source.subscribe_count_handle();
++    let resume_from = source.last_resume_from();
++    let resume_sequence = source.last_resume_sequence();
++    core.add_source(source).await.unwrap();
++    core.add_query(make_persistent_query(
++        "warm-managed-q",
++        "warm-managed-src",
++        Some(configured_policy),
++    ))
++    .await
++    .unwrap();
++    core.start().await.unwrap();
++    core.start_source("warm-managed-src").await.unwrap();
++    core.start_query("warm-managed-q").await.unwrap();
++    send_event(&events, "warm-managed-src", 1, b"position-1").await;
++    let before = wait_for_outbox_sequence(&core, "warm-managed-q", 1).await;
++    wait_for_status(&core, "warm-managed-q", ComponentStatus::Running).await;
++    let runtime = core
++        .query_manager()
++        .get_query_instance("warm-managed-q")
++        .await
++        .unwrap();
++    let error = core
++        .start_query_existing("warm-managed-q")
++        .await
++        .unwrap_err();
++    assert!(error.to_string().contains("already running"), "{error}");
++    assert_eq!(subscriptions.load(Ordering::Acquire), 1);
++    assert_eq!(
++        core.get_query_status("warm-managed-q").await.unwrap(),
++        ComponentStatus::Running
++    );
++
++    core.stop_query("warm-managed-q").await.unwrap();
++    wait_for_status(&core, "warm-managed-q", ComponentStatus::Stopped).await;
++    if manager_api {
++        core.query_manager()
++            .start_query_existing("warm-managed-q".to_string())
++            .await
++            .unwrap();
++    } else {
++        core.start_query_existing("warm-managed-q").await.unwrap();
++    }
++    let restored = runtime.fetch_outbox(0).await.unwrap();
++    assert_eq!(restored.latest_sequence, before.latest_sequence);
++    assert_eq!(restored.output_generation, before.output_generation);
++    assert_eq!(restored.config_hash, before.config_hash);
++    assert_eq!(restored.results[0].sequence, before.results[0].sequence);
++    assert_eq!(restored.results[0].timestamp, before.results[0].timestamp);
++    assert_eq!(restored.results[0].results, before.results[0].results);
++    assert_eq!(
++        *resume_from.read().await,
++        Some(Bytes::from_static(b"position-1"))
++    );
++    assert_eq!(*resume_sequence.read().await, Some(1));
++    assert_eq!(subscriptions.load(Ordering::Acquire), 2);
++    assert!(Arc::ptr_eq(
++        &runtime,
++        &core
++            .query_manager()
++            .get_query_instance("warm-managed-q")
++            .await
++            .unwrap()
++    ));
++    assert_eq!(
++        core.get_source_status("warm-managed-src").await.unwrap(),
++        ComponentStatus::Running
++    );
++    assert_eq!(
++        runtime.fetch_snapshot().await.unwrap().to_vec(),
++        vec![serde_json::json!({"id": "node-1", "value": 1})]
++    );
++    send_event(&events, "warm-managed-src", 2, b"position-2").await;
++    let continued = wait_for_outbox_sequence(&core, "warm-managed-q", 2).await;
++    assert_eq!(continued.latest_sequence, 2);
++    assert_eq!(
++        continued
++            .results
++            .iter()
++            .map(|result| result.sequence)
++            .collect::<Vec<_>>(),
++        vec![1, 2]
++    );
++    assert_eq!(continued.output_generation, before.output_generation);
++    assert_eq!(runtime.fetch_snapshot().await.unwrap().len(), 2);
++
++    core.stop_query("warm-managed-q").await.unwrap();
++    wait_for_status(&core, "warm-managed-q", ComponentStatus::Stopped).await;
++    *injected.lock().unwrap() = RecoveryReadFailure::Checkpoints;
++    core.start_query("warm-managed-q")
++        .await
++        .expect("ordinary starts must retain the configured policy");
++    wait_for_status(&core, "warm-managed-q", ComponentStatus::Running).await;
++    assert_eq!(subscriptions.load(Ordering::Acquire), 3);
++    assert_eq!(
++        core.get_query_config("warm-managed-q")
++            .await
++            .unwrap()
++            .recovery_policy,
++        Some(configured_policy)
++    );
++    core.shutdown().await.unwrap();
++}
++
++#[rstest::rstest]
++#[case::insert_only(1, false, RecoveryPolicy::Strict)]
++#[case::named_update(2, false, RecoveryPolicy::Strict)]
++#[case::malformed_legacy_update(2, true, RecoveryPolicy::Strict)]
++#[case::existing_only_insert(1, false, RecoveryPolicy::ExistingOnly)]
++#[case::existing_only_update(2, false, RecoveryPolicy::ExistingOnly)]
++#[case::existing_only_malformed(2, true, RecoveryPolicy::ExistingOnly)]
++#[tokio::test]
++#[serial]
++async fn test_e2e_outbox_persistent_reopen(
++    #[case] sequence: u64,
++    #[case] legacy_compact: bool,
++    #[case] recovery_policy: RecoveryPolicy,
++) {
+     use crate::channels::{QueryResult, ResultDiff, SourceEvent};
+     use drasi_core::models::{
+         Element, ElementMetadata, ElementPropertyMap, ElementReference, ElementValue, SourceChange,
+@@ -452,7 +1213,7 @@ async fn test_e2e_outbox_persistent_reopen(#[case] sequence: u64, #[case] legacy
+         None
+     };
+ 
+-    let reopened = build_e2e_lib("outbox-reopen", &tmp_dir, Some(RecoveryPolicy::Strict))
++    let reopened = build_e2e_lib("outbox-reopen", &tmp_dir, Some(recovery_policy))
+         .await
+         .unwrap();
+     let source = E2eTestSource::new("outbox-src", true).unwrap();
+@@ -471,7 +1232,10 @@ async fn test_e2e_outbox_persistent_reopen(#[case] sequence: u64, #[case] legacy
+         let message = format!("{error:#}");
+         assert!(message.contains("sequence 2"), "{message}");
+         assert!(message.contains("expected a sequence"), "{message}");
+-        assert!(message.contains("Strict recovery policy"), "{message}");
++        assert!(
++            message.contains(&format!("{recovery_policy:?} recovery policy")),
++            "{message}"
++        );
+         wait_for_status(&reopened, "outbox-q", ComponentStatus::Error).await;
+         reopened.shutdown().await.unwrap();
+         drop(reopened);
+@@ -843,6 +1607,358 @@ async fn test_e2e_auto_reset_position_unavailable() {
+     core.stop_query("reset-q").await.unwrap();
+ }
+ 
++/// Stopped retirement preserves the real backend for supported re-admission.
++#[tokio::test]
++#[serial]
++async fn test_e2e_remove_query_preserving_state_and_existing_only_readmission() {
++    let tmp = tempfile::TempDir::new().unwrap();
++    let seed = build_e2e_lib("retirement-seed", &tmp, None).await.unwrap();
++    let source = E2eTestSource::new("retire-src", true).unwrap();
++    let events = source.event_sender();
++    seed.add_source(source).await.unwrap();
++    seed.add_query(make_persistent_query("retire-q", "retire-src", None))
++        .await
++        .unwrap();
++    seed.start().await.unwrap();
++    seed.start_source("retire-src").await.unwrap();
++    seed.start_query("retire-q").await.unwrap();
++    send_event(&events, "retire-src", 1, b"retirement-position").await;
++    let original = wait_for_outbox_sequence(&seed, "retire-q", 1).await;
++    seed.shutdown().await.unwrap();
++    drop(seed);
++    {
++        let provider = RocksDbIndexProvider::new(tmp.path(), false, false);
++        let created = provider.create_indexes("retire-q").await.unwrap();
++        created
++            .checkpoint_store
++            .as_ref()
++            .unwrap()
++            .write_output_generation("retire-q", 7)
++            .await
++            .unwrap();
++    }
++    let before = logical_rocks_state(tmp.path(), "retire-q");
++    let core = build_e2e_lib("retirement", &tmp, Some(RecoveryPolicy::ExistingOnly))
++        .await
++        .unwrap();
++    let source = E2eTestSource::new("retire-src", true).unwrap();
++    let events = source.event_sender();
++    let resume_from = source.last_resume_from();
++    let resume_sequence = source.last_resume_sequence();
++    let subscriptions = source.subscribe_count_handle();
++    core.add_source(source).await.unwrap();
++    let config =
++        make_persistent_query("retire-q", "retire-src", Some(RecoveryPolicy::ExistingOnly));
++    core.add_query(config.clone()).await.unwrap();
++    core.start().await.unwrap();
++    core.start_source("retire-src").await.unwrap();
++    core.start_query_existing("retire-q").await.unwrap();
++    let runtime = core
++        .query_manager()
++        .get_query_instance("retire-q")
++        .await
++        .unwrap();
++    assert_eq!(runtime.fetch_outbox(0).await.unwrap().output_generation, 7);
++    let error = core
++        .remove_query_preserving_state("retire-q")
++        .await
++        .unwrap_err();
++    assert!(error.to_string().contains("Stopped"), "{error}");
++    assert_eq!(runtime.status().await, ComponentStatus::Running);
++    assert_eq!(subscriptions.load(Ordering::Acquire), 1);
++    core.stop_query("retire-q").await.unwrap();
++    wait_for_status(&core, "retire-q", ComponentStatus::Stopped).await;
++    let log_key = crate::managers::ComponentLogKey::new(
++        "retirement",
++        crate::channels::ComponentType::Query,
++        "retire-q",
++    );
++    let other_key = crate::managers::ComponentLogKey::new(
++        "other-retirement-owner",
++        crate::channels::ComponentType::Query,
++        "retire-q",
++    );
++    let logs = core.log_registry();
++    for key in [&log_key, &other_key] {
++        logs.log(crate::managers::LogMessage::with_instance(
++            crate::managers::LogLevel::Info,
++            "retirement log",
++            &key.instance_id,
++            &key.component_id,
++            key.component_type.clone(),
++        ))
++        .await;
++    }
++    let (_, mut log_rx) = logs.subscribe_by_key(&log_key).await;
++    while log_rx.try_recv().is_ok() {}
++    let mut events_rx = core.subscribe_all_component_events();
++    core.remove_query_preserving_state("retire-q")
++        .await
++        .unwrap();
++    assert_eq!(
++        logical_rocks_state(tmp.path(), "retire-q"),
++        before,
++        "nondestructive removal must preserve every persisted column-family byte"
++    );
++    assert!(!core.component_graph().read().await.contains("retire-q"));
++    assert!(core
++        .query_manager()
++        .get_query_instance("retire-q")
++        .await
++        .is_err());
++    assert!(core
++        .query_manager()
++        .get_all_query_labels()
++        .await
++        .iter()
++        .all(|(id, _)| id != "retire-q"));
++    assert!(logs.get_history_by_key(&log_key).await.is_empty());
++    assert!(!logs.get_history_by_key(&other_key).await.is_empty());
++    assert!(matches!(
++        log_rx.try_recv(),
++        Err(tokio::sync::broadcast::error::TryRecvError::Closed)
++    ));
++    crate::test_helpers::wait_for_component_status(
++        &mut events_rx,
++        "retire-q",
++        ComponentStatus::Removed,
++        std::time::Duration::from_secs(5),
++    )
++    .await;
++    assert!(core
++        .component_graph()
++        .read()
++        .await
++        .get_dependents("retire-src")
++        .is_empty());
++    assert_eq!(
++        core.get_source_status("retire-src").await.unwrap(),
++        ComponentStatus::Running
++    );
++    assert_eq!(subscriptions.load(Ordering::Acquire), 1);
++
++    core.add_query(config).await.unwrap();
++    core.start_query_existing("retire-q").await.unwrap();
++    let readmitted = core
++        .query_manager()
++        .get_query_instance("retire-q")
++        .await
++        .unwrap();
++    assert!(!Arc::ptr_eq(&runtime, &readmitted));
++    let restored = readmitted.fetch_outbox(0).await.unwrap();
++    assert_eq!(restored.output_generation, 7);
++    assert_eq!(restored.latest_sequence, 1);
++    assert_eq!(restored.config_hash, original.config_hash);
++    assert_eq!(restored.results[0].timestamp, original.results[0].timestamp);
++    assert_eq!(restored.results[0].results, original.results[0].results);
++    assert_eq!(
++        *resume_from.read().await,
++        Some(Bytes::from_static(b"retirement-position"))
++    );
++    assert_eq!(*resume_sequence.read().await, Some(1));
++    assert_eq!(
++        readmitted.fetch_snapshot().await.unwrap().to_vec(),
++        vec![serde_json::json!({"id": "node-1", "value": 1})]
++    );
++    send_event(&events, "retire-src", 2, b"retirement-next").await;
++    let continued = wait_for_outbox_sequence(&core, "retire-q", 2).await;
++    assert_eq!(continued.output_generation, 7);
++    assert_eq!(
++        continued
++            .results
++            .iter()
++            .map(|result| result.sequence)
++            .collect::<Vec<_>>(),
++        vec![1, 2]
++    );
++    core.stop_query("retire-q").await.unwrap();
++    wait_for_status(&core, "retire-q", ComponentStatus::Stopped).await;
++    core.query_manager()
++        .remove_query_preserving_state("retire-q".to_string())
++        .await
++        .unwrap();
++    assert!(!core.component_graph().read().await.contains("retire-q"));
++    logs.remove_component_by_key(&other_key).await;
++    core.shutdown().await.unwrap();
++}
++
++#[rstest::rstest]
++#[case::graph_added(ComponentStatus::Added, None, false, false)]
++#[case::graph_running(ComponentStatus::Running, None, false, false)]
++#[case::graph_starting(ComponentStatus::Starting, None, false, false)]
++#[case::graph_stopping(ComponentStatus::Stopping, None, false, false)]
++#[case::graph_reconfiguring(ComponentStatus::Reconfiguring, None, false, false)]
++#[case::graph_error(ComponentStatus::Error, None, false, false)]
++#[case::graph_removed(ComponentStatus::Removed, None, false, false)]
++#[case::runtime_added(ComponentStatus::Stopped, Some(ComponentStatus::Added), false, false)]
++#[case::runtime_running(ComponentStatus::Stopped, Some(ComponentStatus::Running), false, false)]
++#[case::runtime_starting(
++    ComponentStatus::Stopped,
++    Some(ComponentStatus::Starting),
++    false,
++    false
++)]
++#[case::runtime_stopping(
++    ComponentStatus::Stopped,
++    Some(ComponentStatus::Stopping),
++    false,
++    false
++)]
++#[case::runtime_reconfiguring(
++    ComponentStatus::Stopped,
++    Some(ComponentStatus::Reconfiguring),
++    false,
++    false
++)]
++#[case::runtime_error(ComponentStatus::Stopped, Some(ComponentStatus::Error), false, false)]
++#[case::runtime_removed(ComponentStatus::Stopped, Some(ComponentStatus::Removed), false, false)]
++#[case::dependents(ComponentStatus::Stopped, None, true, false)]
++#[case::prepare_failure(ComponentStatus::Stopped, None, false, true)]
++#[tokio::test]
++#[serial]
++async fn test_e2e_preserved_removal_refuses_without_mutation(
++    #[case] graph_status: ComponentStatus,
++    #[case] runtime_status: Option<ComponentStatus>,
++    #[case] dependent: bool,
++    #[case] fail_prepare: bool,
++) {
++    let tmp = tempfile::TempDir::new().unwrap();
++    let core = build_e2e_lib("refused-retirement", &tmp, None)
++        .await
++        .unwrap();
++    let source = E2eTestSource::new("refused-src", true).unwrap();
++    let events = source.event_sender();
++    let subscriptions = source.subscribe_count_handle();
++    let removed_positions = source.position_handle_removed_handle();
++    core.add_source(source).await.unwrap();
++    core.add_query(make_persistent_query("refused-q", "refused-src", None))
++        .await
++        .unwrap();
++    core.start().await.unwrap();
++    core.start_source("refused-src").await.unwrap();
++    core.start_query("refused-q").await.unwrap();
++    send_event(&events, "refused-src", 1, b"refused-position").await;
++    wait_for_outbox_sequence(&core, "refused-q", 1).await;
++    let native = core
++        .query_manager()
++        .get_query_instance("refused-q")
++        .await
++        .unwrap();
++    core.stop_query("refused-q").await.unwrap();
++    wait_for_status(&core, "refused-q", ComponentStatus::Stopped).await;
++    native.release_persistent_handles().await;
++    let before = logical_rocks_state(tmp.path(), "refused-q");
++    core.start_query_existing("refused-q").await.unwrap();
++    core.stop_query("refused-q").await.unwrap();
++    wait_for_status(&core, "refused-q", ComponentStatus::Stopped).await;
++    let query: Arc<dyn super::Query> = Arc::new(RetirementTestQuery {
++        inner: native.clone(),
++        reported_status: runtime_status,
++        fail_prepare,
++    });
++    let graph = core.component_graph();
++    {
++        let mut graph = graph.write().await;
++        graph
++            .set_runtime("refused-q", Box::new(query.clone()))
++            .unwrap();
++        graph.get_component_mut("refused-q").unwrap().status = graph_status;
++        if dependent {
++            graph
++                .register_reaction(
++                    "retirement-dependent",
++                    HashMap::new(),
++                    &["refused-q".into()],
++                )
++                .unwrap();
++        }
++    }
++    let log_key = crate::managers::ComponentLogKey::new(
++        "refused-retirement",
++        crate::channels::ComponentType::Query,
++        "refused-q",
++    );
++    let logs = core.log_registry();
++    logs.log(crate::managers::LogMessage::with_instance(
++        crate::managers::LogLevel::Info,
++        "keep refusal history",
++        &log_key.instance_id,
++        &log_key.component_id,
++        log_key.component_type.clone(),
++    ))
++    .await;
++    let old_log_count = logs.log_count_by_key(&log_key).await;
++    let old_labels = core.query_manager().get_all_query_labels().await;
++    let old_subscriptions = subscriptions.load(Ordering::Acquire);
++    let old_positions = removed_positions.load(Ordering::Acquire);
++    let mut events_rx = core.subscribe_all_component_events();
++    let error = core
++        .remove_query_preserving_state("refused-q")
++        .await
++        .unwrap_err();
++    assert!(
++        error.to_string().contains(if fail_prepare {
++            "injected retirement"
++        } else if dependent {
++            "retirement-dependent"
++        } else {
++            "Stopped"
++        }),
++        "{error}"
++    );
++    assert_eq!(
++        core.get_query_status("refused-q").await.unwrap(),
++        graph_status
++    );
++    assert_eq!(
++        query.status().await,
++        runtime_status.unwrap_or(ComponentStatus::Stopped)
++    );
++    assert!(Arc::ptr_eq(
++        &query,
++        &core
++            .query_manager()
++            .get_query_instance("refused-q")
++            .await
++            .unwrap()
++    ));
++    assert_eq!(
++        core.query_manager().get_all_query_labels().await.len(),
++        old_labels.len()
++    );
++    assert_eq!(logs.log_count_by_key(&log_key).await, old_log_count);
++    assert_eq!(subscriptions.load(Ordering::Acquire), old_subscriptions);
++    assert_eq!(removed_positions.load(Ordering::Acquire), old_positions);
++    assert_eq!(
++        core.get_source_status("refused-src").await.unwrap(),
++        ComponentStatus::Running
++    );
++    assert!(matches!(
++        events_rx.try_recv(),
++        Err(tokio::sync::broadcast::error::TryRecvError::Empty)
++    ));
++    assert!(
++        RocksDbIndexProvider::new(tmp.path(), false, false)
++            .create_indexes("refused-q")
++            .await
++            .is_err(),
++        "refusal must not even release persistent handles"
++    );
++    {
++        let mut graph = graph.write().await;
++        if dependent {
++            graph.deregister("retirement-dependent").unwrap();
++        }
++        graph.get_component_mut("refused-q").unwrap().status = ComponentStatus::Stopped;
++        graph.set_runtime("refused-q", Box::new(native)).unwrap();
++    }
++    core.remove_query_preserving_state("refused-q")
++        .await
++        .unwrap();
++    assert_eq!(logical_rocks_state(tmp.path(), "refused-q"), before);
++    core.shutdown().await.unwrap();
++}
++
+ /// remove_query() clears persistent state so re-adding starts fresh.
+ #[tokio::test]
+ #[serial]
+@@ -865,13 +1981,44 @@ async fn test_e2e_remove_query_clears_persistent_state() {
+     wait_for_status(&core, "rm-q", ComponentStatus::Running).await;
+ 
+     send_event(&event_tx, "rm-src", 1, b"pos-1").await;
+-    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
++    wait_for_outbox_sequence(&core, "rm-q", 1).await;
+ 
+     core.stop_query("rm-q").await.unwrap();
+     wait_for_status(&core, "rm-q", ComponentStatus::Stopped).await;
++    core.query_manager()
++        .get_query_instance("rm-q")
++        .await
++        .unwrap()
++        .release_persistent_handles()
++        .await;
++    let before = logical_rocks_state(tmp_dir.path(), "rm-q");
+ 
+     // Remove the query (should clear persistent state)
+     core.remove_query("rm-q").await.unwrap();
++    assert_ne!(logical_rocks_state(tmp_dir.path(), "rm-q"), before);
++    {
++        let provider = RocksDbIndexProvider::new(tmp_dir.path(), false, false);
++        let created = provider.create_indexes("rm-q").await.unwrap();
++        let store = created.checkpoint_store.as_ref().unwrap();
++        assert!(store.read_config_hash().await.unwrap().is_none());
++        assert!(store.read_all_checkpoints().await.unwrap().is_empty());
++        assert_eq!(store.read_result_sequence("rm-q").await.unwrap(), Some(0));
++        assert_eq!(store.read_output_generation("rm-q").await.unwrap(), Some(1));
++        assert!(created
++            .outbox_writer
++            .unwrap()
++            .read_from("rm-q", 0)
++            .await
++            .unwrap()
++            .is_empty());
++        assert!(created
++            .live_results_writer
++            .unwrap()
++            .read_snapshot("rm-q")
++            .await
++            .unwrap()
++            .is_empty());
++    }
+ 
+     // Re-add the same query and start
+     let query2 = make_persistent_query("rm-q", "rm-src", None);
+@@ -884,6 +2031,20 @@ async fn test_e2e_remove_query_clears_persistent_state() {
+         resume_from.read().await.is_none(),
+         "After remove + re-add, resume_from should be None (persistent state cleared)"
+     );
++    let runtime = core
++        .query_manager()
++        .get_query_instance("rm-q")
++        .await
++        .unwrap();
++    assert_eq!(runtime.fetch_outbox(0).await.unwrap().latest_sequence, 0);
++    assert!(runtime.fetch_snapshot().await.unwrap().is_empty());
++    send_event(&event_tx, "rm-src", 1, b"fresh-pos-1").await;
++    assert_eq!(
++        wait_for_outbox_sequence(&core, "rm-q", 1)
++            .await
++            .latest_sequence,
++        1
++    );
+ 
+     core.stop_query("rm-q").await.unwrap();
+ }
+diff --git a/lib/src/queries/manager.rs b/lib/src/queries/manager.rs
+index 069c6f73fc68f35fd0b96507f8e34f1954821e56..7543eba78db5786a2cecf26ebbc069deeca786a1 100644
+--- a/lib/src/queries/manager.rs
++++ b/lib/src/queries/manager.rs
+@@ -469,12 +469,141 @@ mod tests {
+         assert_eq!(query.subscription_count().await, 0);
+         Ok(())
+     }
++
++    #[rstest::rstest]
++    #[case::processor("processor")]
++    #[case::bootstrap_worker("bootstrap_worker")]
++    #[case::bootstrap_supervisor("bootstrap_supervisor")]
++    #[case::subscription("subscription")]
++    #[tokio::test]
++    async fn preserved_removal_refuses_unjoined_native_work(#[case] task: &str) -> Result<()> {
++        let tmp = tempfile::TempDir::new()?;
++        let core = crate::DrasiLib::builder()
++            .with_index_provider(
++                "persistent",
++                Arc::new(drasi_index_rocksdb::RocksDbIndexProvider::new(
++                    tmp.path(),
++                    false,
++                    false,
++                )),
++            )
++            .with_query(
++                crate::Query::cypher("unjoined-query")
++                    .query("MATCH (n) RETURN n")
++                    .auto_start(false)
++                    .with_storage_backend(crate::StorageBackendRef::Named("persistent".into()))
++                    .build(),
++            )
++            .build()
++            .await?;
++        core.start().await?;
++        core.start_query("unjoined-query").await?;
++        core.stop_query("unjoined-query").await?;
++        crate::component_graph::wait_for_status(
++            &core.component_graph(),
++            "unjoined-query",
++            &[ComponentStatus::Stopped],
++            std::time::Duration::from_secs(5),
++        )
++        .await?;
++        let runtime = core
++            .query_manager()
++            .get_query_instance("unjoined-query")
++            .await
++            .map_err(anyhow::Error::msg)?;
++        let native = runtime.as_any().downcast_ref::<DrasiQuery>().unwrap();
++        match task {
++            "processor" => {
++                native
++                    .base
++                    .set_task_handle(tokio::spawn(std::future::pending()))
++                    .await
++            }
++            "bootstrap_worker" => {
++                native
++                    .bootstrap_tasks
++                    .write()
++                    .await
++                    .spawn(std::future::pending());
++            }
++            "bootstrap_supervisor" => {
++                *native.bootstrap_supervisor.write().await =
++                    Some(tokio::spawn(std::future::pending()));
++            }
++            "subscription" => {
++                native
++                    .subscription_tasks
++                    .write()
++                    .await
++                    .push(tokio::spawn(std::future::pending()));
++            }
++            _ => panic!("unknown task"),
++        }
++        let error = core
++            .remove_query_preserving_state("unjoined-query")
++            .await
++            .unwrap_err();
++        assert!(error.to_string().contains("not been joined"), "{error}");
++        assert!(native.checkpoint_store.read().await.is_some());
++        assert!(native.outbox_writer.read().await.is_some());
++        assert!(native.live_results_writer.read().await.is_some());
++        assert_eq!(
++            core.get_query_status("unjoined-query").await?,
++            ComponentStatus::Stopped
++        );
++        assert!(Arc::ptr_eq(
++            &runtime,
++            &core
++                .query_manager()
++                .get_query_instance("unjoined-query")
++                .await
++                .unwrap()
++        ));
++        core.component_graph()
++            .write()
++            .await
++            .validate_and_transition("unjoined-query", ComponentStatus::Starting, None)?;
++        native
++            .base
++            .set_status(ComponentStatus::Error, Some("test unjoined cleanup".into()))
++            .await;
++        crate::component_graph::wait_for_status(
++            &core.component_graph(),
++            "unjoined-query",
++            &[ComponentStatus::Error],
++            std::time::Duration::from_secs(5),
++        )
++        .await?;
++        core.stop_query("unjoined-query").await?;
++        crate::component_graph::wait_for_status(
++            &core.component_graph(),
++            "unjoined-query",
++            &[ComponentStatus::Stopped],
++            std::time::Duration::from_secs(5),
++        )
++        .await?;
++        core.remove_query_preserving_state("unjoined-query").await?;
++        core.shutdown().await?;
++        Ok(())
++    }
+ }
+ 
+ #[async_trait]
+ pub trait Query: Send + Sync {
+     /// Start the query - subscribes to sources and begins processing events
+     async fn start(&self) -> Result<()>;
++    /// Start with `ExistingOnly` recovery for this invocation, without changing
++    /// the configured policy. Use [`crate::DrasiLib::start_query_existing`] or
++    /// [`QueryManager::start_query_existing`] for managed lifecycle validation.
++    ///
++    /// Custom query implementations must implement the fail-closed contract
++    /// explicitly; the default refuses rather than falling back to `start()`.
++    async fn start_existing(&self) -> Result<()> {
++        anyhow::bail!(
++            "Query '{}' does not support ExistingOnly startup",
++            self.get_config().id
++        )
++    }
+     /// Stop the query and release its active subscriptions and processing tasks.
+     ///
+     /// Failed starts and processing errors can leave resources behind, so this
+@@ -562,8 +691,26 @@ pub trait Query: Send + Sync {
+     ///
+     /// Default: no-op — volatile/in-memory queries hold no such handles.
+     async fn release_persistent_handles(&self) {}
++
++    /// Prepare a stopped runtime for nondestructive removal.
++    ///
++    /// Verify `Stopped` and that all owned work has been joined before releasing
++    /// persistent handles. Failures must leave the runtime and durable state
++    /// unchanged. This runs under the manager's graph write lock; implementations
++    /// must not acquire that graph or report lifecycle updates.
++    ///
++    /// Custom runtimes must opt in explicitly rather than assuming a status
++    /// alone guarantees quiescence.
++    async fn prepare_for_removal_preserving_state(&self) -> Result<()> {
++        anyhow::bail!(
++            "Query '{}' does not support removal preserving state",
++            self.get_config().id
++        )
++    }
+ }
+ 
++type BootstrapTaskResult = (String, Result<Option<crate::bootstrap::BootstrapResult>>);
++
+ /// Bootstrap phase tracking for each source
+ #[derive(Debug, Clone, PartialEq)]
+ enum BootstrapPhase {
+@@ -1294,8 +1441,9 @@ pub struct DrasiQuery {
+     source_manager: Arc<SourceManager>,
+     // Track subscription tasks for cleanup
+     subscription_tasks: Arc<RwLock<Vec<tokio::task::JoinHandle<()>>>>,
+-    // Abort handles for bootstrap + supervisor tasks (for cleanup on stop)
+-    bootstrap_abort_handles: Arc<RwLock<Vec<tokio::task::AbortHandle>>>,
++    // Owned bootstrap workers and supervisor, joined during stop
++    bootstrap_tasks: Arc<RwLock<tokio::task::JoinSet<BootstrapTaskResult>>>,
++    bootstrap_supervisor: RwLock<Option<tokio::task::JoinHandle<()>>>,
+     // Track bootstrap state per source
+     bootstrap_state: Arc<RwLock<HashMap<String, BootstrapPhase>>>,
+     // IndexFactory for creating storage backend indexes
+@@ -1353,7 +1501,8 @@ impl DrasiQuery {
+             priority_queue,
+             source_manager,
+             subscription_tasks: Arc::new(RwLock::new(Vec::new())),
+-            bootstrap_abort_handles: Arc::new(RwLock::new(Vec::new())),
++            bootstrap_tasks: Arc::new(RwLock::new(tokio::task::JoinSet::new())),
++            bootstrap_supervisor: RwLock::new(None),
+             bootstrap_state: Arc::new(RwLock::new(HashMap::new())),
+             index_factory,
+             middleware_registry,
+@@ -1498,9 +1647,11 @@ async fn clear_persistent_indexes(
+     Ok(())
+ }
+ 
+-#[async_trait]
+-impl Query for DrasiQuery {
+-    async fn start(&self) -> Result<()> {
++impl DrasiQuery {
++    async fn start_with_recovery_policy(
++        &self,
++        recovery_policy: crate::recovery::RecoveryPolicy,
++    ) -> Result<()> {
+         log_component_start("Query", &self.base.config.id);
+ 
+         self.bootstrap_state.write().await.clear();
+@@ -1667,6 +1818,19 @@ impl Query for DrasiQuery {
+         // Persist the checkpoint_store for future stop/start cycles
+         *self.checkpoint_store.write().await = Some(checkpoint_store.clone());
+ 
++        let existing_only = recovery_policy == crate::recovery::RecoveryPolicy::ExistingOnly;
++        if existing_only && !checkpoint_store.is_persistent() {
++            let msg = format!(
++                "Query '{}' ExistingOnly recovery requires a persistent checkpoint store",
++                self.base.config.id
++            );
++            error!("{msg}");
++            self.base
++                .set_status(ComponentStatus::Error, Some(msg.clone()))
++                .await;
++            return Err(anyhow::anyhow!(msg));
++        }
++
+         let continuous_query = match builder.try_build().await {
+             Ok(query) => query,
+             Err(e) => {
+@@ -1741,14 +1905,18 @@ impl Query for DrasiQuery {
+             // a full re-bootstrap. If the stored hash doesn't match the current
+             // config, all checkpoints are cleared so sources bootstrap from scratch.
+             //
+-            // Checkpoint operations require an active session for transactional
+-            // backends (e.g., RocksDB). Wrap read/write/clear calls in begin/commit.
++            // Legacy initialization/reset paths use a startup session. ExistingOnly
++            // only reads committed metadata, which does not require a session.
+             let current_hash = super::compute_config_hash(&self.base.config);
+ 
+-            if let Some(sc) = &session_control {
+-                sc.begin()
+-                    .await
+-                    .context("Failed to begin session for config hash check")?;
++            // ExistingOnly reads committed metadata and never opens a startup
++            // write session. Use the same hash read for validation and recovery.
++            if !existing_only {
++                if let Some(sc) = &session_control {
++                    sc.begin()
++                        .await
++                        .context("Failed to begin session for config hash check")?;
++                }
+             }
+ 
+             let stores = DurableOutputStores {
+@@ -1764,7 +1932,29 @@ impl Query for DrasiQuery {
+                 future_queue: &future_queue,
+             };
+ 
+-            let config_matches = match checkpoint_store.read_config_hash().await {
++            let stored_hash = checkpoint_store.read_config_hash().await;
++            if existing_only {
++                let reason = match &stored_hash {
++                    Ok(Some(hash)) if *hash == current_hash => None,
++                    Ok(Some(hash)) => {
++                        Some(format!("config hash mismatch ({hash} != {current_hash})"))
++                    }
++                    Ok(None) => Some("no stored config hash".to_string()),
++                    Err(e) => Some(format!("failed to read config hash: {e}")),
++                };
++                if let Some(reason) = reason {
++                    let msg = format!(
++                        "Query '{}' cannot recover existing state: {reason} (ExistingOnly policy)",
++                        self.base.config.id
++                    );
++                    error!("{msg}");
++                    self.base
++                        .set_status(ComponentStatus::Error, Some(msg.clone()))
++                        .await;
++                    return Err(anyhow::anyhow!(msg));
++                }
++            }
++            let config_matches = match stored_hash {
+                 Ok(Some(stored_hash)) if stored_hash == current_hash => {
+                     debug!(
+                         "Query '{}' config hash matches stored hash ({current_hash}), resuming",
+@@ -2047,6 +2237,17 @@ impl Query for DrasiQuery {
+                         }
+                     }
+                     Err(e) => {
++                        if existing_only {
++                            let msg = format!(
++                                "Query '{}' failed to read checkpoints (ExistingOnly policy): {e}",
++                                self.base.config.id
++                            );
++                            error!("{msg}");
++                            self.base
++                                .set_status(ComponentStatus::Error, Some(msg.clone()))
++                                .await;
++                            return Err(anyhow::anyhow!(msg));
++                        }
+                         warn!(
+                             "Query '{}' failed to read checkpoints, starting fresh: {e}",
+                             self.base.config.id
+@@ -2063,7 +2264,7 @@ impl Query for DrasiQuery {
+             }
+ 
+             // Commit the startup session used for config hash + checkpoint reads/writes.
+-            if let Some(sc) = &session_control {
++            if let Some(sc) = session_control.as_ref().filter(|_| !existing_only) {
+                 if let Err(e) = sc.commit().await {
+                     warn!(
+                         "Query '{}' failed to commit startup session: {e}",
+@@ -2081,7 +2282,7 @@ impl Query for DrasiQuery {
+                 let state = self.output_state.read().await;
+                 (state.initialized(), state.outbox_capacity())
+             };
+-            if already_initialized {
++            if already_initialized && !existing_only {
+                 // Same-process stop/start retains in-memory output, including a
+                 // seq-0 snapshot populated by bootstrap. A new process constructs
+                 // an uninitialized QueryOutputState and takes the hydrate path.
+@@ -2099,7 +2300,11 @@ impl Query for DrasiQuery {
+                 match load_durable_output(&self.base.config.id, &stores, outbox_capacity).await {
+                     Ok((results, outbox, as_of_sequence, generation)) => {
+                         let mut state = self.output_state.write().await;
+-                        state.hydrate(results, outbox, as_of_sequence, generation);
++                        // Validate warm starts without replacing a seq-0 bootstrap
++                        // snapshot that is still retained only in RAM.
++                        if !already_initialized {
++                            state.hydrate(results, outbox, as_of_sequence, generation);
++                        }
+                         let earliest = state.outbox_earliest_seq().unwrap_or(0);
+                         self.output_metrics
+                             .record_live_results_count(state.results_len());
+@@ -2109,7 +2314,7 @@ impl Query for DrasiQuery {
+                             state.as_of_sequence(),
+                         );
+                         info!(
+-                            "Query '{}' hydrated output state from durable storage: seq={}, live_rows={}, outbox={}",
++                            "Query '{}' recovered output state from durable storage: seq={}, live_rows={}, outbox={}",
+                             self.base.config.id,
+                             state.as_of_sequence(),
+                             state.results_len(),
+@@ -2128,12 +2333,13 @@ impl Query for DrasiQuery {
+                             .await;
+                         return Err(anyhow::anyhow!(msg));
+                     }
+-                    Err(inconsistency) => match self.resolved_recovery_policy {
+-                        crate::recovery::RecoveryPolicy::Strict => {
++                    Err(inconsistency) => match recovery_policy {
++                        crate::recovery::RecoveryPolicy::Strict
++                        | crate::recovery::RecoveryPolicy::ExistingOnly => {
+                             let msg = format!(
+                                 "Query '{}' durable output is inconsistent: {inconsistency}. \
+-                                 Refusing to start under Strict recovery policy.",
+-                                self.base.config.id
++                                 Refusing to start under {:?} recovery policy.",
++                                self.base.config.id, recovery_policy
+                             );
+                             error!("{msg}");
+                             self.base
+@@ -2373,11 +2579,12 @@ impl Query for DrasiQuery {
+                         if let Some(source_err) = e.downcast_ref::<crate::sources::SourceError>() {
+                             match source_err {
+                                 crate::sources::SourceError::PositionUnavailable { .. } => {
+-                                    match self.resolved_recovery_policy {
+-                                        crate::recovery::RecoveryPolicy::Strict => {
++                                    match recovery_policy {
++                                        crate::recovery::RecoveryPolicy::Strict
++                                        | crate::recovery::RecoveryPolicy::ExistingOnly => {
+                                             let msg = format!(
+-                                                "Query '{}' source '{}' cannot resume from checkpoint position (Strict policy): {e}",
+-                                                self.base.config.id, source_id
++                                                "Query '{}' source '{}' cannot resume from checkpoint position ({:?} policy): {e}",
++                                                self.base.config.id, source_id, recovery_policy
+                                             );
+                                             error!("{msg}");
+                                             // Cleanup already-spawned tasks
+@@ -2402,7 +2609,7 @@ impl Query for DrasiQuery {
+                                                 .set_status(ComponentStatus::Error, Some(msg))
+                                                 .await;
+                                             return Err(e.context(format!(
+-                                                "PositionUnavailable for source '{source_id}' with Strict recovery policy"
++                                                "PositionUnavailable for source '{source_id}' with {recovery_policy:?} recovery policy"
+                                             )));
+                                         }
+                                         crate::recovery::RecoveryPolicy::AutoReset => {
+@@ -2755,8 +2962,7 @@ impl Query for DrasiQuery {
+             let instance_id = self.instance_id.clone();
+             let bootstrap_output_state = self.output_state.clone();
+ 
+-            let mut bootstrap_handles = Vec::new();
+-            let mut abort_handles = Vec::new();
++            let mut bootstrap_tasks = tokio::task::JoinSet::new();
+ 
+             for (source_id, mut bootstrap_rx, bootstrap_result_rx) in bootstrap_channels {
+                 // Mark source bootstrap as in progress
+@@ -2782,7 +2988,7 @@ impl Query for DrasiQuery {
+                     component_id = %query_id,
+                     component_type = "query"
+                 );
+-                let handle: tokio::task::JoinHandle<(String, anyhow::Result<Option<crate::bootstrap::BootstrapResult>>)> = tokio::spawn(
++                bootstrap_tasks.spawn(
+                     async move {
+                         let mut count = 0u64;
+ 
+@@ -2909,9 +3115,8 @@ impl Query for DrasiQuery {
+                     }
+                     .instrument(span),
+                 );
+-                abort_handles.push(handle.abort_handle());
+-                bootstrap_handles.push(handle);
+             }
++            *self.bootstrap_tasks.write().await = bootstrap_tasks;
+ 
+             // Supervisor task: joins all bootstrap tasks, computes handover
+             // checkpoints, emits the bootstrapCompleted signal, and opens the gate.
+@@ -2924,6 +3129,7 @@ impl Query for DrasiQuery {
+                 let base_dispatchers_clone = base_dispatchers.clone();
+                 let checkpoint_store_for_supervisor = checkpoint_store.clone();
+                 let session_control_for_supervisor = session_control.clone();
++                let bootstrap_tasks = self.bootstrap_tasks.clone();
+ 
+                 let span = tracing::info_span!(
+                     "bootstrap_supervisor",
+@@ -2933,7 +3139,14 @@ impl Query for DrasiQuery {
+                 );
+                 let supervisor_handle = tokio::spawn(
+                     async move {
+-                        let join_results = futures::future::join_all(bootstrap_handles).await;
++                        let join_results = {
++                            let mut tasks = bootstrap_tasks.write().await;
++                            let mut results = Vec::new();
++                            while let Some(result) = tasks.join_next().await {
++                                results.push(result);
++                            }
++                            results
++                        };
+                         let panic_count = join_results.iter().filter(|r| matches!(r, Err(e) if e.is_panic())).count();
+ 
+                         // Collect bootstrap provider failures reported by the per-source
+@@ -3095,11 +3308,8 @@ impl Query for DrasiQuery {
+                     }
+                     .instrument(span),
+                 );
+-                abort_handles.push(supervisor_handle.abort_handle());
++                *self.bootstrap_supervisor.write().await = Some(supervisor_handle);
+             }
+-
+-            // Store abort handles for cleanup on stop()
+-            *self.bootstrap_abort_handles.write().await = abort_handles;
+         } else {
+             info!(
+                 "Query '{}' no bootstrap channels, skipping bootstrap",
+@@ -3453,6 +3663,19 @@ impl Query for DrasiQuery {
+ 
+         Ok(())
+     }
++}
++
++#[async_trait]
++impl Query for DrasiQuery {
++    async fn start(&self) -> Result<()> {
++        self.start_with_recovery_policy(self.resolved_recovery_policy)
++            .await
++    }
++
++    async fn start_existing(&self) -> Result<()> {
++        self.start_with_recovery_policy(crate::recovery::RecoveryPolicy::ExistingOnly)
++            .await
++    }
+ 
+     async fn stop(&self) -> Result<()> {
+         let status = self.base.get_status().await;
+@@ -3478,14 +3701,20 @@ impl Query for DrasiQuery {
+             )
+             .await;
+ 
+-        // Abort bootstrap tasks and supervisor
+-        let bootstrap_aborts: Vec<_> = {
+-            let mut handles = self.bootstrap_abort_handles.write().await;
+-            handles.drain(..).collect()
+-        };
+-        for handle in bootstrap_aborts {
++        // Join the supervisor before taking its worker set; abort alone does not
++        // release the worker futures or their persistent index handles.
++        if let Some(handle) = self.bootstrap_supervisor.write().await.take() {
+             handle.abort();
++            if let Err(e) = handle.await {
++                if !e.is_cancelled() {
++                    error!(
++                        "Query '{}' bootstrap supervisor panicked: {e}",
++                        self.base.config.id
++                    );
++                }
++            }
+         }
++        self.bootstrap_tasks.write().await.shutdown().await;
+ 
+         // Drain and abort source subscription forwarders so they don't leak across restarts
+         let subscription_handles: Vec<_> = {
+@@ -3498,6 +3727,10 @@ impl Query for DrasiQuery {
+             let _ = handle.await;
+         }
+ 
++        // The processor can start the future queue, so join it before stopping
++        // the poller and before reporting Stopped.
++        self.base.stop_task().await?;
++
+         // Stop the FutureQueueSource polling task
+         if let Some(fq) = self.future_queue_source.write().await.take() {
+             fq.stop().await;
+@@ -3520,16 +3753,9 @@ impl Query for DrasiQuery {
+         // Clear tracked source IDs
+         self.subscribed_source_ids.write().await.clear();
+ 
+-        // Use QueryBase common stop behavior to finish shutting down the processor task
++        // Publish Stopped only after all owned work has been joined.
+         self.base.stop_common().await?;
+ 
+-        self.base
+-            .set_status(
+-                ComponentStatus::Stopped,
+-                Some("Query stopped successfully".to_string()),
+-            )
+-            .await;
+-
+         Ok(())
+     }
+ 
+@@ -3647,6 +3873,25 @@ impl Query for DrasiQuery {
+         *self.outbox_writer.write().await = None;
+         *self.live_results_writer.write().await = None;
+     }
++
++    async fn prepare_for_removal_preserving_state(&self) -> Result<()> {
++        anyhow::ensure!(
++            self.status().await == ComponentStatus::Stopped,
++            "Query '{}' runtime must be Stopped before removal preserving state",
++            self.base.config.id
++        );
++        anyhow::ensure!(
++            self.base.task_handle.read().await.is_none()
++                && self.bootstrap_supervisor.read().await.is_none()
++                && self.bootstrap_tasks.read().await.is_empty()
++                && self.subscription_tasks.read().await.is_empty()
++                && self.future_queue_source.read().await.is_none(),
++            "Query '{}' still owns work that has not been joined",
++            self.base.config.id
++        );
++        self.release_persistent_handles().await;
++        Ok(())
++    }
+ }
+ 
+ pub struct QueryManager {
+@@ -3807,6 +4052,24 @@ impl QueryManager {
+         crate::managers::lifecycle_helpers::start_component(&self.graph, &id, "query", &query).await
+     }
+ 
++    /// Start an existing persistent query under `ExistingOnly` for this start.
++    ///
++    /// Uses the normal graph transition validation and error reporting. Does not
++    /// replace the runtime or change the policy used by later `start_query` calls.
++    pub async fn start_query_existing(&self, id: String) -> Result<()> {
++        let query =
++            crate::managers::lifecycle_helpers::get_runtime::<Arc<dyn Query>>(&self.graph, &id)
++                .await
++                .ok_or_else(|| {
++                    anyhow::Error::new(crate::managers::ComponentNotFoundError::new("query", &id))
++                })?;
++
++        crate::managers::lifecycle_helpers::start_component_with(&self.graph, &id, "query", || {
++            query.start_existing()
++        })
++        .await
++    }
++
+     /// Stop a running, starting, or failed query by ID, releasing its active
+     /// subscriptions and processing tasks.
+     ///
+@@ -4062,6 +4325,62 @@ impl QueryManager {
+         Ok(())
+     }
+ 
++    /// Remove only a stopped, joined query runtime while retaining all durable
++    /// query state. Unlike `teardown_query`, this owns graph deregistration too
++    /// and never stops an active runtime or opens/clears its persistent backend.
++    pub async fn remove_query_preserving_state(&self, id: String) -> Result<()> {
++        let query =
++            crate::managers::lifecycle_helpers::get_runtime::<Arc<dyn Query>>(&self.graph, &id)
++                .await
++                .ok_or_else(|| crate::managers::ComponentNotFoundError::new("query", &id))?;
++        anyhow::ensure!(
++            query.status().await == ComponentStatus::Stopped,
++            "Query '{id}' runtime must be Stopped before removal preserving state"
++        );
++        // Keep validation, handle release, deregistration, and cache eviction
++        // exclusive with managed start/update and same-ID registration.
++        let mut graph = self.graph.write().await;
++        let node = graph
++            .get_component(&id)
++            .filter(|node| node.kind == ComponentKind::Query)
++            .ok_or_else(|| crate::managers::ComponentNotFoundError::new("query", &id))?;
++        anyhow::ensure!(
++            node.status == ComponentStatus::Stopped,
++            "Cannot remove query '{id}' preserving state while managed status is {:?}; expected Stopped",
++            node.status
++        );
++        let current = graph
++            .get_runtime::<Arc<dyn Query>>(&id)
++            .ok_or_else(|| crate::managers::ComponentNotFoundError::new("query", &id))?;
++        anyhow::ensure!(
++            Arc::ptr_eq(&query, current),
++            "Query '{id}' runtime changed during removal"
++        );
++        anyhow::ensure!(
++            query.get_config().id == id,
++            "Query '{id}' runtime identity mismatch"
++        );
++        graph.can_remove(&id).map_err(|dependents| {
++            anyhow::anyhow!(
++                "Cannot remove query '{id}': depended on by: {}",
++                dependents.join(", ")
++            )
++        })?;
++        query
++            .prepare_for_removal_preserving_state()
++            .await
++            .with_context(|| {
++                format!("Query '{id}' failed to prepare for removal preserving state")
++            })?;
++        graph.deregister(&id).with_context(|| {
++            format!("Query '{id}' failed to deregister during removal preserving state")
++        })?;
++        self.label_cache.write().await.remove(&id);
++        let log_key = ComponentLogKey::new(&self.instance_id, ComponentType::Query, &id);
++        self.log_registry.remove_component_by_key(&log_key).await;
++        Ok(())
++    }
++
+     /// Release persistent index-backend handles for every query runtime, without
+     /// deleting any on-disk data.
+     ///
+diff --git a/lib/src/queries/tests.rs b/lib/src/queries/tests.rs
+index 32035b034baf2bcaef732e1b50a03bbd8da87ae7..f5db6cf02b0bb6beb168af51e619c7488ad5f1f1 100644
+--- a/lib/src/queries/tests.rs
++++ b/lib/src/queries/tests.rs
+@@ -861,6 +861,44 @@ mod manager_tests {
+         );
+     }
+ 
++    /// Stopping joins bootstrap receiver ownership before runtime retirement.
++    #[tokio::test]
++    async fn test_stop_joins_bootstrap_before_preserved_retirement() {
++        let (manager, source_manager, graph) = create_test_manager_with_graph().await;
++        let (bootstrap_tx, bootstrap_rx) = tokio::sync::mpsc::channel::<BootstrapEvent>(100);
++        let source =
++            create_test_bootstrap_mock_source("joined-bs-source".to_string(), bootstrap_rx);
++        add_source(&source_manager, &graph, source).await.unwrap();
++        add_query(
++            &manager,
++            &graph,
++            create_test_query_config("joined-bs-query", vec!["joined-bs-source".into()]),
++        )
++        .await
++        .unwrap();
++        manager.start_query("joined-bs-query".into()).await.unwrap();
++        assert!(!bootstrap_tx.is_closed());
++        manager.stop_query("joined-bs-query".into()).await.unwrap();
++        assert!(
++            bootstrap_tx.is_closed(),
++            "Stopped must have joined the bootstrap receiver owner"
++        );
++        crate::component_graph::wait_for_status(
++            &graph,
++            "joined-bs-query",
++            &[ComponentStatus::Stopped],
++            std::time::Duration::from_secs(5),
++        )
++        .await
++        .unwrap();
++        manager
++            .remove_query_preserving_state("joined-bs-query".into())
++            .await
++            .unwrap();
++        assert!(!graph.read().await.contains("joined-bs-query"));
++        assert!(graph.read().await.contains("joined-bs-source"));
++    }
++
+     /// Test that deleting a query cleans up its log history
+     #[tokio::test]
+     async fn test_delete_query_cleans_up_log_history() {
+diff --git a/lib/src/recovery.rs b/lib/src/recovery.rs
+index 798aebd556d3de45a6faba1c3b828baece7101fb..93425f471b43e4ae228fd2e4243317cc607e5d08 100644
+--- a/lib/src/recovery.rs
++++ b/lib/src/recovery.rs
+@@ -20,10 +20,10 @@
+ 
+ use serde::{Deserialize, Serialize};
+ 
+-/// Behavior when a source cannot honor a requested resume position.
++/// Startup and gap-recovery behavior for a query.
+ ///
+ /// Configured per-query via `QueryConfig::recovery_policy`. When the field is
+-/// `None`, a future global default applies (which itself defaults to `Strict`).
++/// `None`, the global default applies (which itself defaults to `Strict`).
+ #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+ #[serde(rename_all = "snake_case")]
+ pub enum RecoveryPolicy {
+@@ -35,6 +35,17 @@ pub enum RecoveryPolicy {
+     /// Automatically wipe the query's persistent index and perform a full
+     /// re-bootstrap on gap detection. Favors availability over consistency.
+     AutoReset,
++    /// Recover only an existing persistent query with a readable, matching config
++    /// hash, readable checkpoints, and consistent durable output. Never initialize
++    /// or reset its logical state. Missing metadata, read failures, inconsistent
++    /// output, and unavailable source positions fail startup instead.
++    ///
++    /// Unlike `Strict`, this rejects first startup and configuration changes.
++    /// Create new queries with `Strict` or `AutoReset`, then opt in when reopening
++    /// or use [`crate::DrasiLib::start_query_existing`] for a per-start override.
++    /// Backend opening may create physical files; this protects logical state,
++    /// not filesystem immutability. In-memory backends are rejected.
++    ExistingOnly,
+ }
+ 
+ /// Behavior when a reaction's checkpoint falls behind the query outbox.
+@@ -104,13 +115,25 @@ mod tests {
+ 
+     #[test]
+     fn yaml_round_trip() {
+-        for policy in [RecoveryPolicy::Strict, RecoveryPolicy::AutoReset] {
++        for policy in
++            [RecoveryPolicy::Strict, RecoveryPolicy::AutoReset, RecoveryPolicy::ExistingOnly]
++        {
+             let yaml = serde_yaml::to_string(&policy).unwrap();
+             let back: RecoveryPolicy = serde_yaml::from_str(&yaml).unwrap();
+             assert_eq!(back, policy);
+         }
+     }
+ 
++    #[test]
++    fn json_round_trip_existing_only() {
++        let json = serde_json::to_string(&RecoveryPolicy::ExistingOnly).unwrap();
++        assert_eq!(json, "\"existing_only\"");
++        assert_eq!(
++            serde_json::from_str::<RecoveryPolicy>(&json).unwrap(),
++            RecoveryPolicy::ExistingOnly
++        );
++    }
++
+     #[test]
+     fn incompatible_source_message() {
+         let err = RecoveryError::IncompatibleSource {

@@ -8,6 +8,7 @@ import (
 
 	"go.temporal.io/server/api/adminservice/v1"
 	"go.temporal.io/server/api/historyservice/v1"
+	persistencespb "go.temporal.io/server/api/persistence/v1"
 	"go.temporal.io/server/chasm"
 	"go.temporal.io/server/common"
 	"go.temporal.io/server/common/log"
@@ -20,7 +21,7 @@ import (
 func Invoke(
 	ctx context.Context,
 	request *historyservice.ForceDeleteWorkflowExecutionRequest,
-	shardID int32,
+	shardInfo *persistencespb.ShardInfo,
 	chasmRegistry *chasm.Registry,
 	persistenceExecutionMgr persistence.ExecutionManager,
 	persistenceVisibilityMgr manager.VisibilityManager,
@@ -28,6 +29,7 @@ func Invoke(
 ) (_ *historyservice.ForceDeleteWorkflowExecutionResponse, retError error) {
 	req := request.Request
 	execution := req.Execution
+	shardID := shardInfo.ShardId
 
 	logger = log.With(logger,
 		tag.WorkflowNamespaceID(request.NamespaceId),
@@ -108,6 +110,7 @@ func Invoke(
 		WorkflowID:  execution.WorkflowId,
 		RunID:       execution.RunId,
 		ArchetypeID: archetypeID,
+		RangeID:     shardInfo.RangeId,
 	}); err != nil {
 		return nil, err
 	}

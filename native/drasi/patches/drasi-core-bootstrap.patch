@@ -1,0 +1,3356 @@
+diff --git a/lib/README.md b/lib/README.md
+index 106516500ff5d1e35cd88f99fafcab664c8bab52..99fedca214bb644a707caf1b55f448624594abb2 100644
+--- a/lib/README.md
++++ b/lib/README.md
+@@ -980,6 +980,46 @@ downstream checkpoint consequences considered. The existing opt-in query
+ outbox is not a safe migration. This change performs no automatic migration and
+ does not change recovery policies.
+ 
++#### Durable Initial Snapshots
++
++The query processor owns bootstrap evaluation and publication before processing
++live changes. A persistent bootstrap requires checkpoint, live-results, outbox,
++and session capabilities, plus a successful completion and bounded opaque
++handover position from every bootstrapping source. Evaluation or source completion
++errors fail readiness instead of exposing a partial snapshot.
++
++The SDK marks initial publication as pending before evaluating bootstrap events.
++It then commits the complete keyed result image, every source handover, and an
++explicit result sequence of zero, and reads them back from storage. Only after
++successful readback does it publish the completed marker and expose a ready
++snapshot. Bootstrap does not emit historical outbox entries or advance the output
++generation. The first subsequent result change has sequence one; a live event
++with no result change advances its source checkpoint without advancing that
++sequence. Empty snapshots follow the same publication protocol.
++
++The persisted config-hash slot distinguishes ordinary identity, incomplete reset,
++pending initial publication, and completed initial publication. Snapshot and
++outbox responses continue to expose the ordinary semantic config hash. This
++changes the interpretation of existing metadata, not its encoding or FFI layout.
++Full-output persistent providers also publish an empty initial image when
++bootstrap is disabled. Checkpoint-only providers retain streaming-only operation
++but cannot perform durable bootstrap.
++
++An interrupted publication refuses recovery under `Strict` and `ExistingOnly`;
++an explicit `AutoReset` rebuild is required. Legacy zero-sequence state without a
++completed marker also refuses recovery, even if it contains an explicit zero and
++appears empty: it cannot prove that bootstrap rows were ever persisted. Legacy
++positive-sequence state retains the existing output consistency checks; it is not
++retrospectively certified by this protocol. Changing a source from streaming-only
++to bootstrap-enabled can refuse recovery if its saved handover has no opaque
++position.
++
++Stopping joins the owned processor before releasing source positions or reporting
++`Stopped`. A join timeout retains the task and returns an error; a failed task join
++continues to fail later stops. Permanent shutdown propagates stop failures and
++retains the graph loop and persistent handles. Retrying shutdown after a cancelled
++or timed-out attempt joins unfinished work before releasing those handles.
++
+ #### Recovering an Existing Persistent Query Without Reset
+ 
+ Opt in when reopening a query whose state must not be recreated:
+@@ -1006,9 +1046,10 @@ Backend opening may create physical files or empty databases, so this is a
+ logical-state guarantee, not a read-only filesystem API.
+ 
+ Create genuinely new queries with the default `Strict` policy (or `AutoReset`),
+-then select `ExistingOnly` for recovery. Neither existing policy's behavior changes:
+-`Strict` still initializes new queries and rebuilds on config-hash changes or read
+-failures. A runtime-wide opt-in is available through
++then select `ExistingOnly` for recovery. `Strict` still initializes new queries
++and rebuilds on ordinary config-hash changes or read failures; incomplete initial
++publication and uncertified zero-sequence output refuse as described above.
++A runtime-wide opt-in is available through
+ `DrasiLib::builder().with_default_recovery_policy(RecoveryPolicy::ExistingOnly)`;
+ per-query policies override it. JSON/YAML uses `recoveryPolicy: existing_only`.
+ Recovery policy is not part of the persisted config hash.
+@@ -1033,8 +1074,9 @@ must explicitly implement `start_existing`; its default rejects the operation
+ rather than falling back to ordinary startup.
+ 
+ Adding `ExistingOnly` extends the public `RecoveryPolicy` enum: downstream
+-exhaustive matches must handle the new variant. No persisted data or plugin FFI
+-layout changes are required.
++exhaustive matches must handle the new variant. The durable initial-snapshot
++protocol also adds `DurableOutputInconsistency::MissingBootstrapSnapshot`.
++No plugin FFI layout changes are required; metadata compatibility is described above.
+ 
+ #### Retiring a Query Without Deleting Persistent State
+ 
+diff --git a/lib/src/lib_core.rs b/lib/src/lib_core.rs
+index 60c45128e12559c855aa5b9943d0d31738253f6c..89dc59103cc10280c1a9afed5c7d63b489633ce1 100644
+--- a/lib/src/lib_core.rs
++++ b/lib/src/lib_core.rs
+@@ -161,6 +161,7 @@ pub struct DrasiLib {
+     pub(crate) reaction_manager: Arc<ReactionManager>,
+     pub(crate) running: Arc<RwLock<bool>>,
+     pub(crate) is_shutdown: Arc<std::sync::atomic::AtomicBool>,
++    pub(crate) shutdown_complete: Arc<tokio::sync::Mutex<bool>>,
+     pub(crate) state_guard: StateGuard,
+     // Inspection API for querying server state
+     pub(crate) inspection: InspectionAPI,
+@@ -194,6 +195,7 @@ impl Clone for DrasiLib {
+             reaction_manager: Arc::clone(&self.reaction_manager),
+             running: Arc::clone(&self.running),
+             is_shutdown: Arc::clone(&self.is_shutdown),
++            shutdown_complete: Arc::clone(&self.shutdown_complete),
+             state_guard: self.state_guard.clone(),
+             inspection: self.inspection.clone(),
+             lifecycle: Arc::clone(&self.lifecycle),
+@@ -377,6 +379,7 @@ impl DrasiLib {
+             reaction_manager,
+             running: Arc::new(RwLock::new(false)),
+             is_shutdown: Arc::new(std::sync::atomic::AtomicBool::new(false)),
++            shutdown_complete: Arc::new(tokio::sync::Mutex::new(false)),
+             state_guard,
+             inspection,
+             lifecycle,
+@@ -583,6 +586,10 @@ impl DrasiLib {
+     /// This method is idempotent — calling it on an already-stopped server will
+     /// still clean up the graph update loop.
+     ///
++    /// A failed or cancelled shutdown retains the graph loop and persistent handles.
++    /// Retry `shutdown()` to finish stopping components. New operations remain disabled;
++    /// only a successful shutdown releases the handles and marks teardown complete.
++    ///
+     /// # Examples
+     ///
+     /// ```no_run
+@@ -596,20 +603,17 @@ impl DrasiLib {
+     /// # }
+     /// ```
+     pub async fn shutdown(&self) -> crate::error::Result<()> {
+-        // Mark as permanently shut down; idempotent if already set
+-        if self
+-            .is_shutdown
+-            .swap(true, std::sync::atomic::Ordering::AcqRel)
+-        {
++        let mut complete = self.shutdown_complete.lock().await;
++        if *complete {
+             return Ok(());
+         }
++        self.is_shutdown
++            .store(true, std::sync::atomic::Ordering::Release);
+ 
+-        // Stop components if still running (tolerate stop errors during shutdown)
+-        if self.is_running().await {
+-            if let Err(e) = self.stop().await {
+-                warn!("Errors during shutdown stop: {e}");
+-            }
+-        }
++        // A previous failed stop may have cleared running while retaining tasks.
++        let result = self.lifecycle.stop_all_components().await;
++        *self.running.write().await = false;
++        result.map_err(DrasiError::Internal)?;
+ 
+         // Abort the graph update loop task to prevent leaked spawned tasks.
+         // The loop exits naturally when all senders are dropped, but abort
+@@ -626,6 +630,7 @@ impl DrasiLib {
+         // intact for a future reopen.
+         self.query_manager.release_all_persistent_handles().await;
+ 
++        *complete = true;
+         info!("drasi-lib shut down permanently");
+         Ok(())
+     }
+diff --git a/lib/src/lifecycle.rs b/lib/src/lifecycle.rs
+index 28c51d675132f551d5bd189c6b7e80eac2477820..6cc7ba6d2120ad7e50278159fad9c39e0f27542f 100644
+--- a/lib/src/lifecycle.rs
++++ b/lib/src/lifecycle.rs
+@@ -197,11 +197,13 @@ impl LifecycleManager {
+                 Some(s) => s,
+                 None => continue, // component removed concurrently
+             };
+-            if !crate::component_graph::is_valid_transition(
+-                &kind,
+-                &live_status,
+-                &ComponentStatus::Stopping,
+-            ) {
++            if live_status != ComponentStatus::Stopping
++                && !crate::component_graph::is_valid_transition(
++                    &kind,
++                    &live_status,
++                    &ComponentStatus::Stopping,
++                )
++            {
+                 continue;
+             }
+ 
+diff --git a/lib/src/queries/base.rs b/lib/src/queries/base.rs
+index f84ce5abb985fe5c9881b351665a861633882d58..b2583655d63a91b2a2be3652e98371b8c9c9209e 100644
+--- a/lib/src/queries/base.rs
++++ b/lib/src/queries/base.rs
+@@ -44,7 +44,7 @@
+ //! ```
+ 
+ use anyhow::Result;
+-use log::{debug, error, info, warn};
++use log::{debug, info};
+ use std::sync::Arc;
+ use tokio::sync::RwLock;
+ 
+@@ -70,6 +70,7 @@ pub struct QueryBase {
+     pub task_handle: Arc<RwLock<Option<tokio::task::JoinHandle<()>>>>,
+     /// Sender for shutdown signal
+     pub shutdown_tx: Arc<RwLock<Option<tokio::sync::oneshot::Sender<()>>>>,
++    task_failure: RwLock<Option<String>>,
+ }
+ 
+ impl QueryBase {
+@@ -92,6 +93,7 @@ impl QueryBase {
+             dispatchers: Arc::new(RwLock::new(dispatchers)),
+             task_handle: Arc::new(RwLock::new(None)),
+             shutdown_tx: Arc::new(RwLock::new(None)),
++            task_failure: RwLock::new(None),
+         })
+     }
+ 
+@@ -231,28 +233,26 @@ impl QueryBase {
+             let _ = tx.send(());
+         }
+ 
+-        // Wait for task to complete
+-        if let Some(mut handle) = self.task_handle.write().await.take() {
+-            match tokio::time::timeout(std::time::Duration::from_secs(5), &mut handle).await {
+-                Ok(Ok(())) => {
+-                    info!("Query '{}' task completed successfully", self.config.id);
+-                }
+-                Ok(Err(e)) => {
+-                    error!("Query '{}' task panicked: {}", self.config.id, e);
+-                }
+-                Err(_) => {
+-                    warn!(
+-                        "Query '{}' task did not complete within timeout, aborting",
+-                        self.config.id
+-                    );
+-                    handle.abort();
+-                    if let Err(e) = handle.await {
+-                        if !e.is_cancelled() {
+-                            error!("Query '{}' task panicked during abort: {e}", self.config.id);
+-                        }
+-                    }
++        // Keep the slot occupied while joining; concurrent stops cannot claim quiescence.
++        let mut slot = self.task_handle.write().await;
++        if let Some(failure) = self.task_failure.read().await.as_ref() {
++            anyhow::bail!("{failure}");
++        }
++        if let Some(handle) = slot.as_mut() {
++            match tokio::time::timeout(std::time::Duration::from_secs(5), handle).await {
++                Ok(Ok(())) => {}
++                Ok(Err(error)) => {
++                    let message =
++                        format!("Query '{}' processor join failed: {error}", self.config.id);
++                    *self.task_failure.write().await = Some(message.clone());
++                    anyhow::bail!("{message}");
+                 }
++                Err(_) => anyhow::bail!(
++                    "Query '{}' processor is still stopping; task retained after join timeout",
++                    self.config.id
++                ),
+             }
++            *slot = None;
+         }
+ 
+         Ok(())
+@@ -521,7 +521,7 @@ mod tests {
+     }
+ 
+     #[tokio::test]
+-    async fn test_stop_common_joins_aborted_processor_before_stopped() {
++    async fn test_stop_common_retains_unresponsive_processor_until_joined() {
+         struct TaskExit(Arc<AtomicBool>);
+         impl Drop for TaskExit {
+             fn drop(&mut self) {
+@@ -529,14 +529,26 @@ mod tests {
+             }
+         }
+         let base = QueryBase::new(test_config("joined-stop", None)).unwrap();
++        base.set_status(ComponentStatus::Running, None).await;
+         let exited = Arc::new(AtomicBool::new(false));
+         let guard = TaskExit(exited.clone());
++        let (started, ready) = tokio::sync::oneshot::channel();
++        let (release, released) = tokio::sync::oneshot::channel();
+         base.set_task_handle(tokio::spawn(async move {
+             let _guard = guard;
+-            std::future::pending::<()>().await;
++            started.send(()).unwrap();
++            released.await.unwrap();
+         }))
+         .await;
+-        tokio::task::yield_now().await;
++        ready.await.unwrap();
++        let error = base.stop_common().await.unwrap_err();
++        assert!(error
++            .to_string()
++            .contains("task retained after join timeout"));
++        assert!(base.task_handle.read().await.is_some());
++        assert!(!exited.load(Ordering::SeqCst));
++        assert_eq!(base.get_status().await, ComponentStatus::Running);
++        release.send(()).unwrap();
+         base.stop_common().await.unwrap();
+         assert!(
+             exited.load(Ordering::SeqCst),
+@@ -644,4 +656,75 @@ mod tests {
+         assert_eq!(received1.query_id, "test_query");
+         assert_eq!(received2.query_id, "test_query");
+     }
++    #[tokio::test(start_paused = true)]
++    async fn test_stop_timeout_retains_owned_writer_until_joined() {
++        let base = QueryBase::new(test_config("q1", None)).unwrap();
++        base.set_status(ComponentStatus::Stopping, None).await;
++        let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
++        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
++        let (finished_tx, finished_rx) = tokio::sync::oneshot::channel();
++        base.set_task_handle(tokio::spawn(async move {
++            let _ = entered_tx.send(());
++            if release_rx.await.is_ok() {
++                let _ = finished_tx.send(());
++            }
++        }))
++        .await;
++        entered_rx.await.unwrap();
++
++        let error = base.stop_common().await.unwrap_err();
++        assert!(error
++            .to_string()
++            .contains("task retained after join timeout"));
++        assert_eq!(base.get_status().await, ComponentStatus::Stopping);
++        assert!(base.task_handle.read().await.is_some());
++
++        release_tx.send(()).unwrap();
++        base.stop_common().await.unwrap();
++        finished_rx.await.unwrap();
++        assert!(base.task_handle.read().await.is_none());
++        assert_eq!(base.get_status().await, ComponentStatus::Stopped);
++    }
++
++    #[tokio::test]
++    async fn test_concurrent_stops_join_the_same_owned_writer() {
++        let base = QueryBase::new(test_config("q1", None)).unwrap();
++        base.set_status(ComponentStatus::Stopping, None).await;
++        let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
++        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
++        base.set_task_handle(tokio::spawn(async move {
++            let _ = entered_tx.send(());
++            let _ = release_rx.await;
++        }))
++        .await;
++        entered_rx.await.unwrap();
++        let first = base.stop_common();
++        let second = base.stop_common();
++        tokio::pin!(first, second);
++        assert!(futures::poll!(&mut first).is_pending());
++        assert!(futures::poll!(&mut second).is_pending());
++        assert_eq!(base.get_status().await, ComponentStatus::Stopping);
++
++        release_tx.send(()).unwrap();
++        let (first, second) = tokio::join!(first, second);
++        first.unwrap();
++        second.unwrap();
++        assert!(base.task_handle.read().await.is_none());
++        assert_eq!(base.get_status().await, ComponentStatus::Stopped);
++    }
++
++    #[tokio::test]
++    async fn test_failed_join_never_reports_quiescence_on_retry() {
++        let base = QueryBase::new(test_config("q1", None)).unwrap();
++        base.set_status(ComponentStatus::Stopping, None).await;
++        base.set_task_handle(tokio::spawn(async {
++            panic!("controlled processor panic");
++        }))
++        .await;
++        let first = base.stop_common().await.unwrap_err().to_string();
++        let second = base.stop_common().await.unwrap_err().to_string();
++        assert!(first.contains("processor join failed"));
++        assert_eq!(first, second);
++        assert_eq!(base.get_status().await, ComponentStatus::Stopping);
++    }
+ }
+diff --git a/lib/src/queries/e2e_checkpoint_tests.rs b/lib/src/queries/e2e_checkpoint_tests.rs
+index 9581ccf06a0d49bd8b8b186777583a8142e56576..77235767287982d1b56111ddde00697103efc4dd 100644
+--- a/lib/src/queries/e2e_checkpoint_tests.rs
++++ b/lib/src/queries/e2e_checkpoint_tests.rs
+@@ -42,6 +42,8 @@ use crate::{DrasiLib, Query, RecoveryPolicy};
+ use drasi_core::interface::{CheckpointStore, IndexError, SourceCheckpoint};
+ use drasi_index_rocksdb::RocksDbIndexProvider;
+ 
++mod bootstrap_publication_tests;
++
+ #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+ enum RecoveryReadFailure {
+     #[default]
+@@ -244,9 +246,24 @@ fn logical_rocks_state(path: &std::path::Path, query_id: &str) -> LogicalRocksSt
+ // E2E test source
+ // ============================================================================
+ 
++#[derive(Clone, Copy, Debug, PartialEq, Eq)]
++enum BootstrapFailure {
++    MissingStream,
++    MissingCompletion,
++    DroppedCompletion,
++    Provider,
++    EventCount,
++    MissingPosition,
++    OversizedPosition,
++    ForeignSource,
++}
++
+ struct E2eTestSource {
+     base: SourceBase,
+     replay_capable: bool,
++    bootstrap: Option<Vec<drasi_core::models::SourceChange>>,
++    bootstrap_failure: Option<BootstrapFailure>,
++    last_position_handle: Arc<RwLock<Option<Arc<AtomicU64>>>>,
+     /// Records the most recent `resume_from` received in subscribe().
+     last_resume_from: Arc<RwLock<Option<Bytes>>>,
+     /// Records the most recent `resume_sequence` received in subscribe().
+@@ -266,6 +283,9 @@ impl E2eTestSource {
+         Ok(Self {
+             base: SourceBase::new(SourceBaseParams::new(id))?,
+             replay_capable,
++            bootstrap: None,
++            bootstrap_failure: None,
++            last_position_handle: Arc::new(RwLock::new(None)),
+             last_resume_from: Arc::new(RwLock::new(None)),
+             last_resume_sequence: Arc::new(RwLock::new(None)),
+             subscribe_count: Arc::new(AtomicU32::new(0)),
+@@ -394,14 +414,69 @@ impl Source for E2eTestSource {
+         } else {
+             None
+         };
+-
++        *self.last_position_handle.write().await = position_handle.clone();
++
++        let (bootstrap_receiver, bootstrap_result_receiver) = if let Some(changes) =
++            self.bootstrap.as_ref().filter(|_| {
++                settings.enable_bootstrap
++                    && settings.resume_from.is_none()
++                    && settings.resume_sequence.is_none()
++            }) {
++            let (sender, receiver) = mpsc::channel(changes.len().max(1));
++            for change in changes {
++                sender.try_send(crate::channels::BootstrapEvent {
++                    source_id: if self.bootstrap_failure == Some(BootstrapFailure::ForeignSource) {
++                        "foreign-source".into()
++                    } else {
++                        self.id().into()
++                    },
++                    change: change.clone(),
++                    timestamp: chrono::Utc::now(),
++                    sequence: 0,
++                })?;
++            }
++            drop(sender);
++            let (sender, result) = tokio::sync::oneshot::channel();
++            if self.bootstrap_failure == Some(BootstrapFailure::DroppedCompletion) {
++                drop(sender);
++            } else {
++                let completion = if self.bootstrap_failure == Some(BootstrapFailure::Provider) {
++                    Err(anyhow::anyhow!("injected bootstrap provider error"))
++                } else {
++                    Ok(crate::bootstrap::BootstrapResult {
++                        event_count: changes.len()
++                            + usize::from(
++                                self.bootstrap_failure == Some(BootstrapFailure::EventCount),
++                            ),
++                        source_position: match self.bootstrap_failure {
++                            Some(BootstrapFailure::MissingPosition) => None,
++                            Some(BootstrapFailure::OversizedPosition) => Some(Bytes::from(vec![
++                                1;
++                                SourceBase::MAX_SOURCE_POSITION_BYTES + 1
++                            ])),
++                            _ => Some(Bytes::from_static(b"accepted-cut")),
++                        },
++                    })
++                };
++                sender
++                    .send(completion)
++                    .map_err(|_| anyhow::anyhow!("bootstrap test receiver dropped"))?;
++            }
++            match self.bootstrap_failure {
++                Some(BootstrapFailure::MissingStream) => (None, None),
++                Some(BootstrapFailure::MissingCompletion) => (Some(receiver), None),
++                _ => (Some(receiver), Some(result)),
++            }
++        } else {
++            (None, None)
++        };
+         Ok(SubscriptionResponse {
+             query_id: settings.query_id,
+             source_id: self.id().to_string(),
+             receiver: Box::new(ChannelChangeReceiver::new(rx)),
+-            bootstrap_receiver: None,
++            bootstrap_receiver,
+             position_handle,
+-            bootstrap_result_receiver: None,
++            bootstrap_result_receiver,
+         })
+     }
+ 
+@@ -548,6 +623,191 @@ async fn wait_for_outbox_sequence(
+     .expect("query must commit the expected output sequence")
+ }
+ 
++fn bootstrap_node() -> drasi_core::models::SourceChange {
++    use drasi_core::models::{Element, ElementMetadata, ElementReference};
++    drasi_core::models::SourceChange::Insert {
++        element: Element::Node {
++            metadata: ElementMetadata {
++                reference: ElementReference::new("bootstrap-src", "seed"),
++                labels: Arc::from(vec![Arc::from("Node")]),
++                effective_from: 1,
++            },
++            properties: crate::sources::convert_json_to_element_properties(
++                &serde_json::from_value(serde_json::json!({"id": "seed", "value": 1})).unwrap(),
++            ),
++        },
++    }
++}
++
++fn bootstrap_query(policy: RecoveryPolicy) -> QueryConfig {
++    Query::cypher("bootstrap-q")
++        .query("MATCH (n:Node) RETURN n.id AS id, n.value AS value")
++        .from_source("bootstrap-src")
++        .auto_start(false)
++        .with_storage_backend(StorageBackendRef::Named("persistent".into()))
++        .with_recovery_policy(policy)
++        .build()
++}
++
++#[rstest::rstest]
++#[case::empty(false)]
++#[case::one_row(true)]
++#[tokio::test]
++#[serial]
++async fn test_e2e_bootstrap_zero_sequence_survives_cold_recovery(#[case] populated: bool) {
++    use futures::StreamExt;
++
++    let tmp = tempfile::TempDir::new().unwrap();
++    let core = build_e2e_lib("bootstrap-cold", &tmp, None).await.unwrap();
++    let mut source = E2eTestSource::new("bootstrap-src", true).unwrap();
++    source.bootstrap = Some(if populated {
++        vec![bootstrap_node()]
++    } else {
++        Vec::new()
++    });
++    core.add_source(source).await.unwrap();
++    core.add_query(bootstrap_query(RecoveryPolicy::Strict))
++        .await
++        .unwrap();
++    core.start().await.unwrap();
++    core.start_source("bootstrap-src").await.unwrap();
++    core.start_query("bootstrap-q").await.unwrap();
++    let query = core
++        .query_manager()
++        .get_query_instance("bootstrap-q")
++        .await
++        .unwrap();
++    let initial = tokio::time::timeout(std::time::Duration::from_secs(5), query.fetch_snapshot())
++        .await
++        .unwrap()
++        .unwrap();
++    let expected = if populated {
++        vec![serde_json::json!({"id": "seed", "value": 1})]
++    } else {
++        Vec::new()
++    };
++    assert_eq!(initial.to_vec(), expected);
++    let keyed = initial
++        .clone()
++        .stream_keyed()
++        .collect::<std::collections::BTreeMap<_, _>>()
++        .await;
++    assert_eq!(initial.as_of_sequence, 0);
++    assert!(query.fetch_outbox(0).await.unwrap().results.is_empty());
++    core.stop_query("bootstrap-q").await.unwrap();
++    wait_for_status(&core, "bootstrap-q", ComponentStatus::Stopped).await;
++    core.start_query_existing("bootstrap-q").await.unwrap();
++    let warm = query.fetch_snapshot().await.unwrap();
++    assert_eq!(
++        warm.clone()
++            .stream_keyed()
++            .collect::<std::collections::BTreeMap<_, _>>()
++            .await,
++        keyed
++    );
++    assert_eq!(
++        (
++            warm.as_of_sequence,
++            warm.config_hash,
++            warm.output_generation,
++            warm.to_vec()
++        ),
++        (
++            initial.as_of_sequence,
++            initial.config_hash,
++            initial.output_generation,
++            expected.clone()
++        )
++    );
++    assert!(query.fetch_outbox(0).await.unwrap().results.is_empty());
++    drop(query);
++    core.shutdown().await.unwrap();
++    drop(core);
++
++    let core = build_e2e_lib("bootstrap-cold", &tmp, None).await.unwrap();
++    let mut source = E2eTestSource::new("bootstrap-src", true).unwrap();
++    source.bootstrap = Some(if populated {
++        vec![bootstrap_node()]
++    } else {
++        Vec::new()
++    });
++    core.add_source(source).await.unwrap();
++    core.add_query(bootstrap_query(RecoveryPolicy::ExistingOnly))
++        .await
++        .unwrap();
++    core.start().await.unwrap();
++    core.start_source("bootstrap-src").await.unwrap();
++    core.start_query("bootstrap-q").await.unwrap();
++    let query = core
++        .query_manager()
++        .get_query_instance("bootstrap-q")
++        .await
++        .unwrap();
++    let recovered = tokio::time::timeout(std::time::Duration::from_secs(5), query.fetch_snapshot())
++        .await
++        .unwrap()
++        .unwrap();
++    let outbox = query.fetch_outbox(0).await.unwrap();
++    assert_eq!(
++        recovered
++            .clone()
++            .stream_keyed()
++            .collect::<std::collections::BTreeMap<_, _>>()
++            .await,
++        keyed
++    );
++    drop(query);
++    core.shutdown().await.unwrap();
++    assert_eq!(
++        (
++            recovered.as_of_sequence,
++            recovered.config_hash,
++            recovered.output_generation,
++            recovered.to_vec()
++        ),
++        (
++            initial.as_of_sequence,
++            initial.config_hash,
++            initial.output_generation,
++            expected
++        )
++    );
++    assert_eq!(outbox.latest_sequence, 0);
++    assert!(outbox.results.is_empty());
++}
++
++#[tokio::test]
++#[serial]
++async fn test_e2e_bootstrap_evaluation_failure_is_not_ready() {
++    let tmp = tempfile::TempDir::new().unwrap();
++    let core = build_e2e_lib("bootstrap-error", &tmp, None).await.unwrap();
++    let mut source = E2eTestSource::new("bootstrap-src", true).unwrap();
++    source.bootstrap = Some(vec![bootstrap_node()]);
++    core.add_source(source).await.unwrap();
++    let mut config = bootstrap_query(RecoveryPolicy::Strict);
++    config.query = "MATCH (n:Node) RETURN toUpper(n.value) AS value".into();
++    core.add_query(config).await.unwrap();
++    core.start().await.unwrap();
++    core.start_source("bootstrap-src").await.unwrap();
++    core.start_query("bootstrap-q").await.unwrap();
++    let query = core
++        .query_manager()
++        .get_query_instance("bootstrap-q")
++        .await
++        .unwrap();
++    let snapshot = tokio::time::timeout(std::time::Duration::from_secs(5), query.fetch_snapshot())
++        .await
++        .expect("bootstrap evaluation must settle");
++    let status = query.status().await;
++    drop(query);
++    core.shutdown().await.unwrap();
++    assert!(
++        snapshot.is_err(),
++        "failed bootstrap evaluation exposed a ready snapshot"
++    );
++    assert_eq!(status, ComponentStatus::Error);
++}
++
+ // ============================================================================
+ // E2E Tests
+ // ============================================================================
+diff --git a/lib/src/queries/e2e_checkpoint_tests/bootstrap_publication_tests.rs b/lib/src/queries/e2e_checkpoint_tests/bootstrap_publication_tests.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..741f9439e34c25cd68094975e97259cb63fb5d49
+--- /dev/null
++++ b/lib/src/queries/e2e_checkpoint_tests/bootstrap_publication_tests.rs
+@@ -0,0 +1,1026 @@
++// Copyright 2025 The Drasi Authors.
++//
++// Licensed under the Apache License, Version 2.0 (the "License");
++// you may not use this file except in compliance with the License.
++// You may obtain a copy of the License at
++//
++//     http://www.apache.org/licenses/LICENSE-2.0
++//
++// Unless required by applicable law or agreed to in writing, software
++// distributed under the License is distributed on an "AS IS" BASIS,
++// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++// See the License for the specific language governing permissions and
++// limitations under the License.
++
++use super::*;
++use drasi_core::interface::{LiveResultsWriter, RowMutation, SessionControl};
++use futures::StreamExt;
++use std::sync::{Mutex, Weak};
++
++#[derive(Clone, Copy, Debug, PartialEq, Eq)]
++enum Fault {
++    FenceWrite,
++    FenceWriteAfter,
++    FenceRead,
++    Begin,
++    Rows,
++    RowsNoop,
++    Checkpoint,
++    CheckpointNoop,
++    Sequence,
++    SequenceNoop,
++    Commit,
++    CommitAfter,
++    CommitNoop,
++    RowsPanic,
++    ReadCheckpoints,
++    ReadRows,
++    ReadSequence,
++    ReadGeneration,
++    Publish,
++    PublishAfter,
++    PublishNoop,
++    PublishRead,
++}
++
++#[derive(Clone, Copy)]
++enum Pause {
++    Commit,
++    Publish,
++}
++
++struct PublicationGate {
++    point: Pause,
++    entered: tokio::sync::Notify,
++    release: tokio::sync::Notify,
++}
++
++#[derive(Default)]
++struct Trace {
++    fenced: bool,
++    begins: usize,
++    commits: usize,
++    hash_reads: usize,
++    hit: bool,
++}
++
++struct Probe {
++    fault: Option<Fault>,
++    hash: u64,
++    trace: Mutex<Trace>,
++    gate: Option<Arc<PublicationGate>>,
++    store: Mutex<Option<Weak<dyn CheckpointStore>>>,
++    rows: Mutex<Option<Weak<dyn LiveResultsWriter>>>,
++}
++
++impl Probe {
++    fn new(fault: Option<Fault>) -> Self {
++        Self {
++            fault,
++            hash: crate::queries::compute_config_hash(&bootstrap_query(RecoveryPolicy::Strict)),
++            trace: Mutex::new(Trace::default()),
++            gate: None,
++            store: Mutex::new(None),
++            rows: Mutex::new(None),
++        }
++    }
++
++    fn hit(&self, point: Fault) -> bool {
++        if self.fault == Some(point) {
++            self.trace.lock().unwrap().hit = true;
++            true
++        } else {
++            false
++        }
++    }
++
++    fn fail(&self, point: Fault) -> Result<(), IndexError> {
++        if self.hit(point) {
++            Err(IndexError::other(std::io::Error::other(format!(
++                "injected {point:?}"
++            ))))
++        } else {
++            Ok(())
++        }
++    }
++
++    fn fenced(&self) -> bool {
++        self.trace.lock().unwrap().fenced
++    }
++
++    async fn pause(&self, point: Pause) {
++        if let Some(gate) = &self.gate {
++            if matches!(
++                (gate.point, point),
++                (Pause::Commit, Pause::Commit) | (Pause::Publish, Pause::Publish)
++            ) {
++                gate.entered.notify_one();
++                gate.release.notified().await;
++            }
++        }
++    }
++}
++
++struct PublicationProvider {
++    inner: RocksDbIndexProvider,
++    probe: Arc<Probe>,
++}
++
++#[async_trait]
++impl IndexBackendPlugin for PublicationProvider {
++    async fn create_indexes(&self, query_id: &str) -> Result<CreatedIndexes, IndexError> {
++        let mut indexes = self.inner.create_indexes(query_id).await?;
++        let checkpoints = indexes.checkpoint_store.take().unwrap();
++        let rows = indexes.live_results_writer.take().unwrap();
++        *self.probe.store.lock().unwrap() = Some(Arc::downgrade(&checkpoints));
++        *self.probe.rows.lock().unwrap() = Some(Arc::downgrade(&rows));
++        indexes.checkpoint_store = Some(Arc::new(PublicationCheckpoints {
++            inner: checkpoints,
++            probe: self.probe.clone(),
++        }));
++        indexes.live_results_writer = Some(Arc::new(PublicationRows {
++            inner: rows,
++            probe: self.probe.clone(),
++        }));
++        indexes.set.session_control = Arc::new(PublicationSession {
++            inner: indexes.set.session_control,
++            probe: self.probe.clone(),
++        });
++        Ok(indexes)
++    }
++
++    fn is_volatile(&self) -> bool {
++        false
++    }
++}
++
++struct PublicationCheckpoints {
++    inner: Arc<dyn CheckpointStore>,
++    probe: Arc<Probe>,
++}
++
++#[async_trait]
++impl CheckpointStore for PublicationCheckpoints {
++    fn is_persistent(&self) -> bool {
++        true
++    }
++
++    async fn stage_checkpoint(
++        &self,
++        source_id: &str,
++        sequence: u64,
++        position: Option<&Bytes>,
++    ) -> Result<(), IndexError> {
++        if self.probe.fenced() {
++            self.probe.fail(Fault::Checkpoint)?;
++            if self.probe.hit(Fault::CheckpointNoop) {
++                return Ok(());
++            }
++        }
++        self.inner
++            .stage_checkpoint(source_id, sequence, position)
++            .await
++    }
++
++    async fn read_checkpoint(
++        &self,
++        source_id: &str,
++    ) -> Result<Option<SourceCheckpoint>, IndexError> {
++        self.inner.read_checkpoint(source_id).await
++    }
++
++    async fn read_all_checkpoints(&self) -> Result<HashMap<String, SourceCheckpoint>, IndexError> {
++        if self.probe.fenced() {
++            self.probe.fail(Fault::ReadCheckpoints)?;
++        }
++        self.inner.read_all_checkpoints().await
++    }
++
++    async fn clear_checkpoints(&self) -> Result<(), IndexError> {
++        self.inner.clear_checkpoints().await
++    }
++
++    async fn write_config_hash(&self, hash: u64) -> Result<(), IndexError> {
++        let pending = self.probe.hash.wrapping_add(4);
++        let published = self.probe.hash.wrapping_add(2);
++        if hash == pending {
++            self.probe.fail(Fault::FenceWrite)?;
++        }
++        if hash == published {
++            self.probe.pause(Pause::Publish).await;
++            self.probe.fail(Fault::Publish)?;
++            if self.probe.hit(Fault::PublishNoop) {
++                return Ok(());
++            }
++        }
++        self.inner.write_config_hash(hash).await?;
++        if hash == pending {
++            self.probe.trace.lock().unwrap().fenced = true;
++            self.probe.fail(Fault::FenceWriteAfter)?;
++        }
++        if hash == published {
++            self.probe.fail(Fault::PublishAfter)?;
++        }
++        Ok(())
++    }
++
++    async fn read_config_hash(&self) -> Result<Option<u64>, IndexError> {
++        if self.probe.fenced() {
++            let count = {
++                let mut trace = self.probe.trace.lock().unwrap();
++                trace.hash_reads += 1;
++                trace.hash_reads
++            };
++            if count == 1 {
++                self.probe.fail(Fault::FenceRead)?;
++            } else {
++                self.probe.fail(Fault::PublishRead)?;
++            }
++        }
++        self.inner.read_config_hash().await
++    }
++
++    async fn stage_result_sequence(&self, id: &str, sequence: u64) -> Result<(), IndexError> {
++        if self.probe.fenced() {
++            self.probe.fail(Fault::Sequence)?;
++            if self.probe.hit(Fault::SequenceNoop) {
++                return Ok(());
++            }
++        }
++        self.inner.stage_result_sequence(id, sequence).await
++    }
++
++    async fn write_result_sequence(&self, id: &str, sequence: u64) -> Result<(), IndexError> {
++        self.inner.write_result_sequence(id, sequence).await
++    }
++
++    async fn read_result_sequence(&self, id: &str) -> Result<Option<u64>, IndexError> {
++        if self.probe.fenced() {
++            self.probe.fail(Fault::ReadSequence)?;
++        }
++        self.inner.read_result_sequence(id).await
++    }
++
++    async fn write_output_generation(&self, id: &str, generation: u64) -> Result<(), IndexError> {
++        self.inner.write_output_generation(id, generation).await
++    }
++
++    async fn read_output_generation(&self, id: &str) -> Result<Option<u64>, IndexError> {
++        if self.probe.fenced() {
++            self.probe.fail(Fault::ReadGeneration)?;
++        }
++        self.inner.read_output_generation(id).await
++    }
++}
++
++struct PublicationSession {
++    inner: Arc<dyn SessionControl>,
++    probe: Arc<Probe>,
++}
++
++#[async_trait]
++impl SessionControl for PublicationSession {
++    async fn begin(&self) -> Result<(), IndexError> {
++        let final_image = {
++            let mut trace = self.probe.trace.lock().unwrap();
++            if trace.fenced {
++                trace.begins += 1;
++            }
++            trace.fenced && trace.begins == 2
++        };
++        if final_image {
++            self.probe.fail(Fault::Begin)?;
++        }
++        self.inner.begin().await
++    }
++
++    async fn commit(&self) -> Result<(), IndexError> {
++        let final_image = {
++            let mut trace = self.probe.trace.lock().unwrap();
++            if trace.fenced {
++                trace.commits += 1;
++            }
++            trace.fenced && trace.commits == 2
++        };
++        if final_image {
++            self.probe.pause(Pause::Commit).await;
++            self.probe.fail(Fault::Commit)?;
++            if self.probe.hit(Fault::CommitNoop) {
++                return Ok(());
++            }
++        }
++        self.inner.commit().await?;
++        if final_image {
++            self.probe.fail(Fault::CommitAfter)?;
++        }
++        Ok(())
++    }
++
++    fn rollback(&self) -> Result<(), IndexError> {
++        self.inner.rollback()
++    }
++}
++
++struct PublicationRows {
++    inner: Arc<dyn LiveResultsWriter>,
++    probe: Arc<Probe>,
++}
++
++#[async_trait]
++impl LiveResultsWriter for PublicationRows {
++    async fn apply_mutations(
++        &self,
++        id: &str,
++        mutations: &[RowMutation<'_>],
++    ) -> Result<(), IndexError> {
++        if self.probe.hit(Fault::RowsPanic) {
++            panic!("controlled bootstrap writer panic");
++        }
++        self.probe.fail(Fault::Rows)?;
++        if self.probe.hit(Fault::RowsNoop) {
++            return Ok(());
++        }
++        self.inner.apply_mutations(id, mutations).await
++    }
++
++    async fn read_snapshot(&self, id: &str) -> Result<Vec<(u64, Vec<u8>)>, IndexError> {
++        if self.probe.fenced() {
++            self.probe.fail(Fault::ReadRows)?;
++        }
++        self.inner.read_snapshot(id).await
++    }
++
++    async fn clear(&self, id: &str) -> Result<(), IndexError> {
++        self.inner.clear(id).await
++    }
++
++    async fn row_count(&self, id: &str) -> Result<usize, IndexError> {
++        self.inner.row_count(id).await
++    }
++}
++
++async fn publication_core(tmp: &tempfile::TempDir, probe: Arc<Probe>) -> DrasiLib {
++    DrasiLib::builder()
++        .with_id("bootstrap-publication")
++        .with_index_provider(
++            "persistent",
++            Arc::new(PublicationProvider {
++                inner: RocksDbIndexProvider::new(tmp.path(), false, false),
++                probe,
++            }),
++        )
++        .build()
++        .await
++        .unwrap()
++}
++
++async fn add_bootstrap_source(core: &DrasiLib) -> Arc<AtomicU32> {
++    let mut source = E2eTestSource::new("bootstrap-src", true).unwrap();
++    source.bootstrap = Some(vec![bootstrap_node()]);
++    let count = source.subscribe_count_handle();
++    core.add_source(source).await.unwrap();
++    count
++}
++
++#[rstest::rstest]
++#[case::missing_stream(BootstrapFailure::MissingStream)]
++#[case::missing_completion(BootstrapFailure::MissingCompletion)]
++#[case::dropped_completion(BootstrapFailure::DroppedCompletion)]
++#[case::provider_error(BootstrapFailure::Provider)]
++#[case::event_count(BootstrapFailure::EventCount)]
++#[case::missing_position(BootstrapFailure::MissingPosition)]
++#[case::oversized_position(BootstrapFailure::OversizedPosition)]
++#[case::foreign_source(BootstrapFailure::ForeignSource)]
++#[tokio::test]
++#[serial]
++async fn test_bootstrap_source_failure_never_exposes_ready(#[case] failure: BootstrapFailure) {
++    let tmp = tempfile::TempDir::new().unwrap();
++    let core = build_e2e_lib("bootstrap-source-error", &tmp, None)
++        .await
++        .unwrap();
++    let mut source = E2eTestSource::new("bootstrap-src", true).unwrap();
++    source.bootstrap = Some(vec![bootstrap_node()]);
++    source.bootstrap_failure = Some(failure);
++    core.add_source(source).await.unwrap();
++    core.add_query(bootstrap_query(RecoveryPolicy::Strict))
++        .await
++        .unwrap();
++    core.start().await.unwrap();
++    core.start_source("bootstrap-src").await.unwrap();
++    let start = core.start_query("bootstrap-q").await;
++    if failure == BootstrapFailure::MissingStream {
++        assert!(start.is_err());
++    } else {
++        start.unwrap();
++    }
++    let query = core
++        .query_manager()
++        .get_query_instance("bootstrap-q")
++        .await
++        .unwrap();
++    assert!(
++        tokio::time::timeout(std::time::Duration::from_secs(5), query.fetch_snapshot(),)
++            .await
++            .unwrap()
++            .is_err(),
++        "{failure:?}"
++    );
++    assert_eq!(query.status().await, ComponentStatus::Error);
++    drop(query);
++    core.shutdown().await.unwrap();
++    drop(core);
++    let before = logical_rocks_state(tmp.path(), "bootstrap-q");
++    let core = build_e2e_lib("bootstrap-source-reopen", &tmp, None)
++        .await
++        .unwrap();
++    let subscriptions = add_bootstrap_source(&core).await;
++    core.add_query(bootstrap_query(RecoveryPolicy::ExistingOnly))
++        .await
++        .unwrap();
++    core.start().await.unwrap();
++    core.start_source("bootstrap-src").await.unwrap();
++    assert!(
++        core.start_query("bootstrap-q").await.is_err(),
++        "{failure:?}"
++    );
++    assert_eq!(subscriptions.load(Ordering::Acquire), 0);
++    core.shutdown().await.unwrap();
++    drop(core);
++    assert_eq!(logical_rocks_state(tmp.path(), "bootstrap-q"), before);
++}
++
++#[rstest::rstest]
++#[case::fence_write(Fault::FenceWrite)]
++#[case::fence_write_then_error(Fault::FenceWriteAfter)]
++#[case::fence_read(Fault::FenceRead)]
++#[case::begin(Fault::Begin)]
++#[case::rows(Fault::Rows)]
++#[case::rows_success_noop(Fault::RowsNoop)]
++#[case::checkpoint(Fault::Checkpoint)]
++#[case::checkpoint_success_noop(Fault::CheckpointNoop)]
++#[case::sequence(Fault::Sequence)]
++#[case::sequence_success_noop(Fault::SequenceNoop)]
++#[case::commit(Fault::Commit)]
++#[case::commit_then_error(Fault::CommitAfter)]
++#[case::commit_success_noop(Fault::CommitNoop)]
++#[case::readback_checkpoints(Fault::ReadCheckpoints)]
++#[case::readback_rows(Fault::ReadRows)]
++#[case::readback_sequence(Fault::ReadSequence)]
++#[case::readback_generation(Fault::ReadGeneration)]
++#[case::publish(Fault::Publish)]
++#[case::publish_then_error(Fault::PublishAfter)]
++#[case::publish_success_noop(Fault::PublishNoop)]
++#[case::published_read(Fault::PublishRead)]
++#[tokio::test]
++#[serial]
++async fn test_bootstrap_publication_failure_never_exposes_ready(#[case] fault: Fault) {
++    let tmp = tempfile::TempDir::new().unwrap();
++    let probe = Arc::new(Probe::new(Some(fault)));
++    let core = publication_core(&tmp, probe.clone()).await;
++    add_bootstrap_source(&core).await;
++    core.add_query(bootstrap_query(RecoveryPolicy::Strict))
++        .await
++        .unwrap();
++    core.start().await.unwrap();
++    core.start_source("bootstrap-src").await.unwrap();
++    core.start_query("bootstrap-q").await.unwrap();
++    let query = core
++        .query_manager()
++        .get_query_instance("bootstrap-q")
++        .await
++        .unwrap();
++    let snapshot = tokio::time::timeout(std::time::Duration::from_secs(5), query.fetch_snapshot())
++        .await
++        .unwrap();
++    assert!(snapshot.is_err(), "{fault:?}");
++    assert_eq!(query.status().await, ComponentStatus::Error, "{fault:?}");
++    assert!(
++        probe.trace.lock().unwrap().hit,
++        "fault was not reached: {fault:?}"
++    );
++    drop(query);
++    core.shutdown().await.unwrap();
++    drop(core);
++    let before = logical_rocks_state(tmp.path(), "bootstrap-q");
++
++    let core = build_e2e_lib("bootstrap-reopen", &tmp, None).await.unwrap();
++    let subscriptions = add_bootstrap_source(&core).await;
++    core.add_query(bootstrap_query(RecoveryPolicy::ExistingOnly))
++        .await
++        .unwrap();
++    core.start().await.unwrap();
++    core.start_source("bootstrap-src").await.unwrap();
++    let start = core.start_query("bootstrap-q").await;
++    if matches!(fault, Fault::PublishAfter | Fault::PublishRead) {
++        start.unwrap();
++        let query = core
++            .query_manager()
++            .get_query_instance("bootstrap-q")
++            .await
++            .unwrap();
++        let recovered = query.fetch_snapshot().await.unwrap();
++        assert_eq!(recovered.as_of_sequence, 0);
++        assert_eq!(recovered.output_generation, 0);
++        assert_eq!(
++            recovered.to_vec(),
++            vec![serde_json::json!({"id": "seed", "value": 1})]
++        );
++        assert!(query.fetch_outbox(0).await.unwrap().results.is_empty());
++        drop(query);
++        assert_eq!(subscriptions.load(Ordering::Acquire), 1);
++    } else {
++        assert!(start.is_err(), "incomplete image was recovered: {fault:?}");
++        assert_eq!(subscriptions.load(Ordering::Acquire), 0);
++    }
++    core.shutdown().await.unwrap();
++    drop(core);
++    assert_eq!(
++        logical_rocks_state(tmp.path(), "bootstrap-q"),
++        before,
++        "{fault:?}"
++    );
++}
++
++#[tokio::test]
++#[serial]
++async fn test_bootstrap_panic_reports_error_and_never_reports_a_successful_stop() {
++    let tmp = tempfile::TempDir::new().unwrap();
++    let probe = Arc::new(Probe::new(Some(Fault::RowsPanic)));
++    let core = publication_core(&tmp, probe.clone()).await;
++    add_bootstrap_source(&core).await;
++    core.add_query(bootstrap_query(RecoveryPolicy::Strict))
++        .await
++        .unwrap();
++    core.start().await.unwrap();
++    core.start_source("bootstrap-src").await.unwrap();
++    core.start_query("bootstrap-q").await.unwrap();
++    let query = core
++        .query_manager()
++        .get_query_instance("bootstrap-q")
++        .await
++        .unwrap();
++    assert!(
++        tokio::time::timeout(std::time::Duration::from_secs(5), query.fetch_snapshot(),)
++            .await
++            .unwrap()
++            .is_err()
++    );
++    assert_eq!(query.status().await, ComponentStatus::Error);
++    assert!(probe.trace.lock().unwrap().hit);
++    assert!(core.stop_query("bootstrap-q").await.is_err());
++    assert_ne!(query.status().await, ComponentStatus::Stopped);
++    assert!(query.stop().await.is_err());
++    assert_ne!(query.status().await, ComponentStatus::Stopped);
++    drop(query);
++    assert!(core.shutdown().await.is_err());
++    assert!(core.graph_update_handle.lock().await.is_some());
++    assert!(probe
++        .rows
++        .lock()
++        .unwrap()
++        .as_ref()
++        .unwrap()
++        .upgrade()
++        .is_some());
++    assert!(core.shutdown().await.is_err());
++}
++
++#[rstest::rstest]
++#[case::cancelled(false, false)]
++#[case::timed_out(true, false)]
++#[case::manager_cancelled(false, true)]
++#[tokio::test]
++#[serial]
++async fn test_shutdown_retries_unfinished_publication_without_releasing_handles(
++    #[case] time_out: bool,
++    #[case] use_manager: bool,
++) {
++    let tmp = tempfile::TempDir::new().unwrap();
++    let gate = Arc::new(PublicationGate {
++        point: Pause::Commit,
++        entered: tokio::sync::Notify::new(),
++        release: tokio::sync::Notify::new(),
++    });
++    let mut probe = Probe::new(None);
++    probe.gate = Some(gate.clone());
++    let probe = Arc::new(probe);
++    let core = publication_core(&tmp, probe.clone()).await;
++    let mut source = E2eTestSource::new("bootstrap-src", true).unwrap();
++    source.bootstrap = Some(vec![bootstrap_node()]);
++    let removed = source.position_handle_removed_handle();
++    core.add_source(source).await.unwrap();
++    core.add_query(bootstrap_query(RecoveryPolicy::Strict))
++        .await
++        .unwrap();
++    core.start().await.unwrap();
++    core.start_source("bootstrap-src").await.unwrap();
++    core.start_query("bootstrap-q").await.unwrap();
++    tokio::time::timeout(std::time::Duration::from_secs(5), gate.entered.notified())
++        .await
++        .unwrap();
++    let query = core
++        .query_manager()
++        .get_query_instance("bootstrap-q")
++        .await
++        .unwrap();
++    {
++        let shutdown = core.shutdown();
++        tokio::pin!(shutdown);
++        assert!(futures::poll!(&mut shutdown).is_pending());
++        tokio::select! {
++            result = &mut shutdown => panic!("shutdown finished before joining publication: {result:?}"),
++            result = tokio::time::timeout(std::time::Duration::from_secs(5), async {
++                while query.status().await != ComponentStatus::Stopping {
++                    tokio::task::yield_now().await;
++                }
++            }) => {
++                result.unwrap();
++            }
++        }
++        if time_out {
++            tokio::time::pause();
++            tokio::time::advance(std::time::Duration::from_secs(6)).await;
++            assert!(shutdown.await.is_err());
++            tokio::time::resume();
++        }
++    }
++    assert_eq!(removed.load(Ordering::Acquire), 0);
++    assert!(core.graph_update_handle.lock().await.is_some());
++    assert!(probe
++        .rows
++        .lock()
++        .unwrap()
++        .as_ref()
++        .unwrap()
++        .upgrade()
++        .is_some());
++    {
++        let retry = async {
++            if use_manager {
++                core.query_manager().stop_all().await
++            } else {
++                core.shutdown().await.map_err(anyhow::Error::from)
++            }
++        };
++        tokio::pin!(retry);
++        assert!(futures::poll!(&mut retry).is_pending());
++        gate.release.notify_one();
++        retry.await.unwrap();
++    }
++    assert_eq!(query.status().await, ComponentStatus::Stopped);
++    assert_eq!(removed.load(Ordering::Acquire), 1);
++    core.shutdown().await.unwrap();
++    assert!(core.graph_update_handle.lock().await.is_none());
++    core.shutdown().await.unwrap();
++}
++
++#[rstest::rstest]
++#[case::commit(Pause::Commit)]
++#[case::publish(Pause::Publish)]
++#[tokio::test]
++#[serial]
++async fn test_stop_joins_publication_before_releasing_source_ownership(#[case] point: Pause) {
++    let tmp = tempfile::TempDir::new().unwrap();
++    let gate = Arc::new(PublicationGate {
++        point,
++        entered: tokio::sync::Notify::new(),
++        release: tokio::sync::Notify::new(),
++    });
++    let mut probe = Probe::new(None);
++    probe.gate = Some(gate.clone());
++    let probe = Arc::new(probe);
++    let core = publication_core(&tmp, probe.clone()).await;
++    let mut source = E2eTestSource::new("bootstrap-src", true).unwrap();
++    source.bootstrap = Some(vec![bootstrap_node()]);
++    let removed = source.position_handle_removed_handle();
++    core.add_source(source).await.unwrap();
++    core.add_query(bootstrap_query(RecoveryPolicy::Strict))
++        .await
++        .unwrap();
++    core.start().await.unwrap();
++    core.start_source("bootstrap-src").await.unwrap();
++    core.start_query("bootstrap-q").await.unwrap();
++    tokio::time::timeout(std::time::Duration::from_secs(5), gate.entered.notified())
++        .await
++        .unwrap();
++    let query = core
++        .query_manager()
++        .get_query_instance("bootstrap-q")
++        .await
++        .unwrap();
++    {
++        let stop = core.stop_query("bootstrap-q");
++        tokio::pin!(stop);
++        assert!(futures::poll!(&mut stop).is_pending());
++        tokio::time::timeout(std::time::Duration::from_secs(5), async {
++            while query.status().await != ComponentStatus::Stopping {
++                tokio::task::yield_now().await;
++            }
++        })
++        .await
++        .unwrap();
++        assert!(futures::poll!(&mut stop).is_pending());
++        assert_eq!(removed.load(Ordering::Acquire), 0);
++        assert!(query.fetch_snapshot().await.is_err());
++        let store = probe
++            .store
++            .lock()
++            .unwrap()
++            .as_ref()
++            .unwrap()
++            .upgrade()
++            .unwrap();
++        let rows = probe
++            .rows
++            .lock()
++            .unwrap()
++            .as_ref()
++            .unwrap()
++            .upgrade()
++            .unwrap();
++        if matches!(point, Pause::Commit) {
++            assert_eq!(
++                store.read_result_sequence("bootstrap-q").await.unwrap(),
++                None
++            );
++            // Checkpoint reads include this active transaction's staged handover.
++            assert_eq!(
++                store.read_all_checkpoints().await.unwrap(),
++                HashMap::from([(
++                    "bootstrap-src".to_string(),
++                    SourceCheckpoint::new(0, Some(Bytes::from_static(b"accepted-cut"))),
++                )])
++            );
++            assert!(rows.read_snapshot("bootstrap-q").await.unwrap().is_empty());
++        }
++        drop(rows);
++        drop(store);
++        gate.release.notify_one();
++        stop.await.unwrap();
++    }
++    assert_eq!(query.status().await, ComponentStatus::Stopped);
++    assert_eq!(removed.load(Ordering::Acquire), 1);
++    drop(query);
++    core.shutdown().await.unwrap();
++    drop(core);
++
++    let core = build_e2e_lib("bootstrap-stopped", &tmp, None)
++        .await
++        .unwrap();
++    let subscriptions = add_bootstrap_source(&core).await;
++    core.add_query(bootstrap_query(RecoveryPolicy::ExistingOnly))
++        .await
++        .unwrap();
++    core.start().await.unwrap();
++    core.start_source("bootstrap-src").await.unwrap();
++    let start = core.start_query("bootstrap-q").await;
++    if matches!(point, Pause::Publish) {
++        start.unwrap();
++        let query = core
++            .query_manager()
++            .get_query_instance("bootstrap-q")
++            .await
++            .unwrap();
++        assert_eq!(
++            query.fetch_snapshot().await.unwrap().to_vec(),
++            vec![serde_json::json!({"id": "seed", "value": 1})]
++        );
++        drop(query);
++        assert_eq!(subscriptions.load(Ordering::Acquire), 1);
++    } else {
++        assert!(start.is_err());
++        assert_eq!(subscriptions.load(Ordering::Acquire), 0);
++    }
++    core.shutdown().await.unwrap();
++}
++
++#[rstest::rstest]
++#[case::legacy_hash_only(false)]
++#[case::legacy_explicit_zero(true)]
++#[tokio::test]
++#[serial]
++async fn test_legacy_empty_zero_image_is_not_a_published_snapshot(#[case] explicit_zero: bool) {
++    let tmp = tempfile::TempDir::new().unwrap();
++    {
++        let provider = RocksDbIndexProvider::new(tmp.path(), false, false);
++        let indexes = provider.create_indexes("bootstrap-q").await.unwrap();
++        let checkpoints = indexes.checkpoint_store.as_ref().unwrap();
++        let config = bootstrap_query(RecoveryPolicy::Strict);
++        checkpoints
++            .write_config_hash(crate::queries::compute_config_hash(&config))
++            .await
++            .unwrap();
++        if explicit_zero {
++            checkpoints
++                .write_result_sequence("bootstrap-q", 0)
++                .await
++                .unwrap();
++        }
++        indexes.set.session_control.begin().await.unwrap();
++        checkpoints
++            .stage_checkpoint(
++                "bootstrap-src",
++                0,
++                Some(&Bytes::from_static(b"accepted-cut")),
++            )
++            .await
++            .unwrap();
++        indexes.set.session_control.commit().await.unwrap();
++    }
++    let before = logical_rocks_state(tmp.path(), "bootstrap-q");
++    let core = build_e2e_lib("legacy-bootstrap", &tmp, None).await.unwrap();
++    let subscriptions = add_bootstrap_source(&core).await;
++    core.add_query(bootstrap_query(RecoveryPolicy::ExistingOnly))
++        .await
++        .unwrap();
++    core.start().await.unwrap();
++    core.start_source("bootstrap-src").await.unwrap();
++    let error = core.start_query("bootstrap-q").await.unwrap_err();
++    assert!(format!("{error:#}").contains("no published durable initial snapshot"));
++    assert_eq!(subscriptions.load(Ordering::Acquire), 0);
++    core.shutdown().await.unwrap();
++    drop(core);
++    assert_eq!(logical_rocks_state(tmp.path(), "bootstrap-q"), before);
++}
++
++#[tokio::test]
++#[serial]
++async fn test_no_diff_after_bootstrap_advances_checkpoint_without_advancing_output() {
++    let tmp = tempfile::TempDir::new().unwrap();
++    let mut initial = None;
++    for (policy, sequence, value, position) in [
++        (RecoveryPolicy::Strict, 7, 1, b"no-diff".as_slice()),
++        (RecoveryPolicy::ExistingOnly, 8, 2, b"next-cut".as_slice()),
++    ] {
++        let core = build_e2e_lib("bootstrap-no-diff", &tmp, None)
++            .await
++            .unwrap();
++        let mut source = E2eTestSource::new("bootstrap-src", true).unwrap();
++        source.bootstrap = Some(vec![bootstrap_node()]);
++        let tx = source.event_sender();
++        let handle = source.last_position_handle.clone();
++        let resume_from = source.last_resume_from();
++        let resume_sequence = source.last_resume_sequence();
++        core.add_source(source).await.unwrap();
++        core.add_query(bootstrap_query(policy)).await.unwrap();
++        core.start().await.unwrap();
++        core.start_source("bootstrap-src").await.unwrap();
++        core.start_query("bootstrap-q").await.unwrap();
++        let query = core
++            .query_manager()
++            .get_query_instance("bootstrap-q")
++            .await
++            .unwrap();
++        let snapshot = query.fetch_snapshot().await.unwrap();
++        let identity = (
++            snapshot.as_of_sequence,
++            snapshot.config_hash,
++            snapshot.output_generation,
++            snapshot
++                .stream_keyed()
++                .collect::<std::collections::BTreeMap<_, _>>()
++                .await,
++        );
++        if let Some(expected) = &initial {
++            assert_eq!(&identity, expected);
++            assert_eq!(
++                *resume_from.read().await,
++                Some(Bytes::from_static(b"no-diff"))
++            );
++            assert_eq!(*resume_sequence.read().await, Some(7));
++        } else {
++            assert_eq!(identity.0, 0);
++            assert_eq!(identity.2, 0);
++            assert_eq!(
++                identity.3.values().cloned().collect::<Vec<_>>(),
++                vec![serde_json::json!({"id": "seed", "value": 1})]
++            );
++            initial = Some(identity);
++        }
++
++        let drasi_core::models::SourceChange::Insert { mut element } = bootstrap_node() else {
++            unreachable!()
++        };
++        let drasi_core::models::Element::Node {
++            metadata,
++            properties,
++        } = &mut element
++        else {
++            unreachable!()
++        };
++        metadata.effective_from = sequence;
++        properties.insert("value", drasi_core::models::ElementValue::Integer(value));
++        let event = SourceEventWrapper::new(
++            "bootstrap-src".into(),
++            crate::channels::events::SourceEvent::Change(
++                drasi_core::models::SourceChange::Update { element },
++            ),
++            chrono::Utc::now(),
++            sequence,
++        )
++        .with_source_position(Bytes::copy_from_slice(position));
++        tx.read()
++            .await
++            .as_ref()
++            .unwrap()
++            .send(Arc::new(event))
++            .await
++            .unwrap();
++        let handle = handle.read().await.clone().unwrap();
++        tokio::time::timeout(std::time::Duration::from_secs(5), async {
++            while handle.load(Ordering::Acquire) != sequence {
++                tokio::task::yield_now().await;
++            }
++        })
++        .await
++        .unwrap();
++        let snapshot = query.fetch_snapshot().await.unwrap();
++        let outbox = query.fetch_outbox(0).await.unwrap();
++        let expected_sequence = u64::from(value == 2);
++        assert_eq!(snapshot.as_of_sequence, expected_sequence);
++        assert_eq!(outbox.latest_sequence, expected_sequence);
++        assert_eq!(outbox.results.len(), expected_sequence as usize);
++        assert_eq!(
++            snapshot
++                .stream_keyed()
++                .collect::<std::collections::BTreeMap<_, _>>()
++                .await,
++            initial
++                .as_ref()
++                .unwrap()
++                .3
++                .keys()
++                .map(|key| (*key, serde_json::json!({"id": "seed", "value": value})))
++                .collect()
++        );
++        drop(query);
++        core.shutdown().await.unwrap();
++        drop(core);
++    }
++}
++
++#[tokio::test]
++#[serial]
++async fn test_bootstrap_publishes_one_complete_multisource_aggregate() {
++    let tmp = tempfile::TempDir::new().unwrap();
++    let mut initial = None;
++    for policy in [RecoveryPolicy::Strict, RecoveryPolicy::ExistingOnly] {
++        let core = build_e2e_lib("bootstrap-multisource", &tmp, None)
++            .await
++            .unwrap();
++        for id in ["bootstrap-src", "other-src"] {
++            let mut change = bootstrap_node();
++            let drasi_core::models::SourceChange::Insert {
++                element: drasi_core::models::Element::Node { metadata, .. },
++            } = &mut change
++            else {
++                unreachable!()
++            };
++            metadata.reference = drasi_core::models::ElementReference::new(id, "seed");
++            let mut source = E2eTestSource::new(id, true).unwrap();
++            source.bootstrap = Some(vec![change]);
++            core.add_source(source).await.unwrap();
++        }
++        core.add_query(
++            Query::cypher("bootstrap-q")
++                .query("MATCH (n:Node) RETURN sum(n.value) AS total")
++                .from_source("bootstrap-src")
++                .from_source("other-src")
++                .auto_start(false)
++                .with_storage_backend(StorageBackendRef::Named("persistent".into()))
++                .with_recovery_policy(policy)
++                .build(),
++        )
++        .await
++        .unwrap();
++        core.start().await.unwrap();
++        core.start_source("bootstrap-src").await.unwrap();
++        core.start_source("other-src").await.unwrap();
++        core.start_query("bootstrap-q").await.unwrap();
++        let query = core
++            .query_manager()
++            .get_query_instance("bootstrap-q")
++            .await
++            .unwrap();
++        let snapshot = query.fetch_snapshot().await.unwrap();
++        assert_eq!(snapshot.to_vec(), vec![serde_json::json!({"total": 2.0})]);
++        assert_eq!(snapshot.as_of_sequence, 0);
++        assert!(query.fetch_outbox(0).await.unwrap().results.is_empty());
++        let identity = (
++            snapshot.config_hash,
++            snapshot.output_generation,
++            snapshot
++                .stream_keyed()
++                .collect::<std::collections::BTreeMap<_, _>>()
++                .await,
++        );
++        if let Some(expected) = &initial {
++            assert_eq!(&identity, expected);
++        } else {
++            initial = Some(identity);
++        }
++        drop(query);
++        core.shutdown().await.unwrap();
++        drop(core);
++    }
++}
+diff --git a/lib/src/queries/manager.rs b/lib/src/queries/manager.rs
+index 7543eba78db5786a2cecf26ebbc069deeca786a1..5822cd7bb76987525dc4368df7912406635b374f 100644
+--- a/lib/src/queries/manager.rs
++++ b/lib/src/queries/manager.rs
+@@ -14,11 +14,12 @@
+ 
+ use anyhow::{Context, Result};
+ use async_trait::async_trait;
++use futures::FutureExt;
+ use log::{debug, error, info, warn};
+ use std::collections::HashMap;
+ use std::collections::HashSet;
+ use std::sync::Arc;
+-use tokio::sync::{Notify, RwLock};
++use tokio::sync::{Mutex, RwLock};
+ 
+ // Import drasi-core components
+ use drasi_core::{
+@@ -52,8 +53,9 @@ use crate::managers::{
+ use crate::metrics::QueryOutputMetrics;
+ use crate::queries::label_extractor::{LabelExtractor, QueryLabels};
+ use crate::queries::output_state::{
+-    next_output_generation, reconcile_durable_output, DurableOutputInconsistency, FetchError,
+-    OutboxGap, OutboxResponse, QueryOutputState, SnapshotResponse,
++    next_output_generation, reconcile_durable_output, BootstrapRecovery,
++    DurableOutputInconsistency, FetchError, OutboxGap, OutboxResponse, QueryOutputState,
++    SnapshotResponse,
+ };
+ use crate::queries::priority_queue::RankedSourceEvent;
+ use crate::queries::PriorityQueue;
+@@ -63,6 +65,9 @@ use crate::sources::Source;
+ use crate::sources::SourceManager;
+ use tracing::Instrument;
+ 
++mod bootstrap;
++use bootstrap::{BootstrapInput, BootstrapPersistence, BootstrapRun};
++
+ /// Default query configuration
+ struct DefaultQueryConfig;
+ 
+@@ -164,6 +169,7 @@ mod tests {
+ 
+     fn test_output_stores() -> DurableOutputStores {
+         DurableOutputStores {
++            bootstrap: BootstrapRecovery::NotRequired,
+             checkpoint_store: Arc::new(InMemoryCheckpointStore::new()),
+             outbox_writer: Some(Arc::new(InMemoryOutboxWriter::new())),
+             live_results_writer: Some(Arc::new(InMemoryLiveResultsWriter::new())),
+@@ -512,11 +518,16 @@ mod tests {
+             .await
+             .map_err(anyhow::Error::msg)?;
+         let native = runtime.as_any().downcast_ref::<DrasiQuery>().unwrap();
++        let mut processor_release = None;
+         match task {
+             "processor" => {
++                let (release, released) = tokio::sync::oneshot::channel();
++                processor_release = Some(release);
+                 native
+                     .base
+-                    .set_task_handle(tokio::spawn(std::future::pending()))
++                    .set_task_handle(tokio::spawn(async move {
++                        released.await.unwrap();
++                    }))
+                     .await
+             }
+             "bootstrap_worker" => {
+@@ -574,6 +585,9 @@ mod tests {
+             std::time::Duration::from_secs(5),
+         )
+         .await?;
++        if let Some(release) = processor_release {
++            release.send(()).unwrap();
++        }
+         core.stop_query("unjoined-query").await?;
+         crate::component_graph::wait_for_status(
+             &core.component_graph(),
+@@ -1064,6 +1078,7 @@ async fn dispatch_query_results(
+ 
+ /// Durable stores used to hydrate and wipe query output.
+ struct DurableOutputStores {
++    bootstrap: BootstrapRecovery,
+     checkpoint_store: Arc<dyn CheckpointStore>,
+     outbox_writer: Option<Arc<dyn OutboxWriter>>,
+     live_results_writer: Option<Arc<dyn LiveResultsWriter>>,
+@@ -1075,6 +1090,15 @@ fn output_reset_in_progress_hash(current_hash: u64) -> u64 {
+     !current_hash
+ }
+ 
++// Even offsets distinguish both bootstrap markers from the reset complement.
++fn bootstrap_published_hash(current_hash: u64) -> u64 {
++    current_hash.wrapping_add(2)
++}
++
++fn bootstrap_in_progress_hash(current_hash: u64) -> u64 {
++    current_hash.wrapping_add(4)
++}
++
+ async fn persisted_output_generation(
+     stores: &DurableOutputStores,
+     query_id: &str,
+@@ -1229,6 +1253,7 @@ async fn load_durable_output(
+         &outbox_sequences,
+         raw_live_rows.len(),
+         live_rows_readable,
++        stores.bootstrap,
+     )?;
+ 
+     let mut outbox_entries = Vec::with_capacity(raw_outbox.len());
+@@ -1444,6 +1469,8 @@ pub struct DrasiQuery {
+     // Owned bootstrap workers and supervisor, joined during stop
+     bootstrap_tasks: Arc<RwLock<tokio::task::JoinSet<BootstrapTaskResult>>>,
+     bootstrap_supervisor: RwLock<Option<tokio::task::JoinHandle<()>>>,
++    operations: Mutex<()>,
++    publication: Arc<Mutex<()>>,
+     // Track bootstrap state per source
+     bootstrap_state: Arc<RwLock<HashMap<String, BootstrapPhase>>>,
+     // IndexFactory for creating storage backend indexes
+@@ -1503,6 +1530,8 @@ impl DrasiQuery {
+             subscription_tasks: Arc::new(RwLock::new(Vec::new())),
+             bootstrap_tasks: Arc::new(RwLock::new(tokio::task::JoinSet::new())),
+             bootstrap_supervisor: RwLock::new(None),
++            operations: Mutex::new(()),
++            publication: Arc::new(Mutex::new(())),
+             bootstrap_state: Arc::new(RwLock::new(HashMap::new())),
+             index_factory,
+             middleware_registry,
+@@ -1652,6 +1681,23 @@ impl DrasiQuery {
+         &self,
+         recovery_policy: crate::recovery::RecoveryPolicy,
+     ) -> Result<()> {
++        let _operation = self.operations.lock().await;
++        anyhow::ensure!(
++            self.base.task_handle.read().await.is_none()
++                && self.subscription_tasks.read().await.is_empty(),
++            "Query '{}' must finish stop cleanup before starting",
++            self.base.config.id
++        );
++        let result = self.start_inner(recovery_policy).await;
++        if let Err(error) = &result {
++            self.base
++                .set_status(ComponentStatus::Error, Some(format!("{error:#}")))
++                .await;
++        }
++        result
++    }
++
++    async fn start_inner(&self, recovery_policy: crate::recovery::RecoveryPolicy) -> Result<()> {
+         log_component_start("Query", &self.base.config.id);
+ 
+         self.bootstrap_state.write().await.clear();
+@@ -1897,7 +1943,20 @@ impl DrasiQuery {
+         // incorrect results.
+         let mut subscription_settings = subscription_settings;
+         let has_persistent_backend = checkpoint_store.is_persistent();
++        let can_persist_output = self.live_results_writer.read().await.is_some()
++            && self.outbox_writer.read().await.is_some()
++            && session_control.is_some();
+         let mut hydrate_output = false;
++        let mut initialize_output = false;
++        let mut bootstrap_recovery = if can_persist_output
++            || subscription_settings
++                .iter()
++                .any(|settings| settings.enable_bootstrap)
++        {
++            BootstrapRecovery::Required
++        } else {
++            BootstrapRecovery::NotRequired
++        };
+         let mut checkpoint_sequences_per_source: std::collections::HashMap<String, u64> =
+             std::collections::HashMap::new();
+         if has_persistent_backend {
+@@ -1920,6 +1979,7 @@ impl DrasiQuery {
+             }
+ 
+             let stores = DurableOutputStores {
++                bootstrap: BootstrapRecovery::NotRequired,
+                 checkpoint_store: checkpoint_store.clone(),
+                 outbox_writer: self.outbox_writer.read().await.clone(),
+                 live_results_writer: self.live_results_writer.read().await.clone(),
+@@ -1935,7 +1995,12 @@ impl DrasiQuery {
+             let stored_hash = checkpoint_store.read_config_hash().await;
+             if existing_only {
+                 let reason = match &stored_hash {
+-                    Ok(Some(hash)) if *hash == current_hash => None,
++                    Ok(Some(hash))
++                        if *hash == current_hash
++                            || *hash == bootstrap_published_hash(current_hash) =>
++                    {
++                        None
++                    }
+                     Ok(Some(hash)) => {
+                         Some(format!("config hash mismatch ({hash} != {current_hash})"))
+                     }
+@@ -1955,7 +2020,13 @@ impl DrasiQuery {
+                 }
+             }
+             let config_matches = match stored_hash {
+-                Ok(Some(stored_hash)) if stored_hash == current_hash => {
++                Ok(Some(stored_hash))
++                    if stored_hash == current_hash
++                        || stored_hash == bootstrap_published_hash(current_hash) =>
++                {
++                    if stored_hash == bootstrap_published_hash(current_hash) {
++                        bootstrap_recovery = BootstrapRecovery::Published;
++                    }
+                     debug!(
+                         "Query '{}' config hash matches stored hash ({current_hash}), resuming",
+                         self.base.config.id
+@@ -1963,8 +2034,15 @@ impl DrasiQuery {
+                     true
+                 }
+                 Ok(Some(stored_hash))
+-                    if stored_hash == output_reset_in_progress_hash(current_hash) =>
++                    if stored_hash == output_reset_in_progress_hash(current_hash)
++                        || stored_hash == bootstrap_in_progress_hash(current_hash) =>
+                 {
++                    anyhow::ensure!(
++                        stored_hash != bootstrap_in_progress_hash(current_hash)
++                            || recovery_policy == crate::recovery::RecoveryPolicy::AutoReset,
++                        "Query '{}' has an incomplete durable bootstrap; explicit AutoReset is required",
++                        self.base.config.id
++                    );
+                     info!(
+                         "Query '{}' found incomplete AutoReset marker, finishing output and index wipe",
+                         self.base.config.id
+@@ -2208,12 +2286,28 @@ impl DrasiQuery {
+             // Only hydrate and resume checkpoints when the config hash matched.
+             // A mismatch (or first run) starts at sequence 0 against empty output.
+             hydrate_output = config_matches;
++            initialize_output = !config_matches && can_persist_output;
+ 
+             // Only read checkpoints if the config hash matched — otherwise we
+             // cleared them above and a full bootstrap will run.
+             if config_matches {
+                 match checkpoint_store.read_all_checkpoints().await {
+                     Ok(checkpoints) => {
++                        if bootstrap_recovery == BootstrapRecovery::Published {
++                            anyhow::ensure!(
++                                subscription_settings.iter().all(|settings| {
++                                    checkpoints.get(&settings.source_id).is_some_and(|cp| {
++                                        !settings.enable_bootstrap
++                                            || cp.source_position.as_ref().is_some_and(|position| {
++                                                position.len()
++                                                    <= crate::sources::base::SourceBase::MAX_SOURCE_POSITION_BYTES
++                                            })
++                                    })
++                                }),
++                                "Query '{}' has incomplete published bootstrap checkpoints",
++                                self.base.config.id
++                            );
++                        }
+                         for settings in &mut subscription_settings {
+                             if let Some(cp) = checkpoints.get(&settings.source_id) {
+                                 checkpoint_sequences_per_source
+@@ -2265,12 +2359,9 @@ impl DrasiQuery {
+ 
+             // Commit the startup session used for config hash + checkpoint reads/writes.
+             if let Some(sc) = session_control.as_ref().filter(|_| !existing_only) {
+-                if let Err(e) = sc.commit().await {
+-                    warn!(
+-                        "Query '{}' failed to commit startup session: {e}",
+-                        self.base.config.id
+-                    );
+-                }
++                sc.commit()
++                    .await
++                    .context("Failed to commit query startup session")?;
+             }
+         }
+ 
+@@ -2282,7 +2373,10 @@ impl DrasiQuery {
+                 let state = self.output_state.read().await;
+                 (state.initialized(), state.outbox_capacity())
+             };
+-            if already_initialized && !existing_only {
++            if already_initialized
++                && !existing_only
++                && bootstrap_recovery == BootstrapRecovery::NotRequired
++            {
+                 // Same-process stop/start retains in-memory output, including a
+                 // seq-0 snapshot populated by bootstrap. A new process constructs
+                 // an uninitialized QueryOutputState and takes the hydrate path.
+@@ -2293,6 +2387,7 @@ impl DrasiQuery {
+                 );
+             } else {
+                 let stores = DurableOutputStores {
++                    bootstrap: bootstrap_recovery,
+                     checkpoint_store: checkpoint_store.clone(),
+                     outbox_writer: self.outbox_writer.read().await.clone(),
+                     live_results_writer: self.live_results_writer.read().await.clone(),
+@@ -2300,9 +2395,15 @@ impl DrasiQuery {
+                 match load_durable_output(&self.base.config.id, &stores, outbox_capacity).await {
+                     Ok((results, outbox, as_of_sequence, generation)) => {
+                         let mut state = self.output_state.write().await;
+-                        // Validate warm starts without replacing a seq-0 bootstrap
+-                        // snapshot that is still retained only in RAM.
+-                        if !already_initialized {
++                        if already_initialized {
++                            anyhow::ensure!(
++                                state.clone_results() == results
++                                    && state.as_of_sequence() == as_of_sequence
++                                    && state.generation() == generation,
++                                "Query '{}' warm output differs from committed output",
++                                self.base.config.id
++                            );
++                        } else {
+                             state.hydrate(results, outbox, as_of_sequence, generation);
+                         }
+                         let earliest = state.outbox_earliest_seq().unwrap_or(0);
+@@ -2402,6 +2503,7 @@ impl DrasiQuery {
+                             }
+ 
+                             checkpoint_sequences_per_source.clear();
++                            initialize_output = can_persist_output;
+                             for settings in &mut subscription_settings {
+                                 settings.resume_from = None;
+                                 settings.resume_sequence = None;
+@@ -2451,13 +2553,7 @@ impl DrasiQuery {
+                 .collect::<Vec<_>>()
+         );
+ 
+-        let mut bootstrap_channels: Vec<(
+-            String,
+-            tokio::sync::mpsc::Receiver<crate::channels::BootstrapEvent>,
+-            Option<
+-                tokio::sync::oneshot::Receiver<anyhow::Result<crate::bootstrap::BootstrapResult>>,
+-            >,
+-        )> = Vec::new();
++        let mut bootstrap_channels = Vec::new();
+         let mut subscription_tasks: Vec<tokio::task::JoinHandle<()>> = Vec::new();
+ 
+         // Build list of sources to subscribe to
+@@ -2688,6 +2784,7 @@ impl DrasiQuery {
+                                                 let current_hash =
+                                                     super::compute_config_hash(&self.base.config);
+                                                 let stores = DurableOutputStores {
++                                                    bootstrap: BootstrapRecovery::NotRequired,
+                                                     checkpoint_store: checkpoint_store.clone(),
+                                                     outbox_writer: self
+                                                         .outbox_writer
+@@ -2755,6 +2852,7 @@ impl DrasiQuery {
+                                                         .await;
+                                                     return Err(anyhow::anyhow!(msg));
+                                                 }
++                                                initialize_output = can_persist_output;
+                                             }
+ 
+                                             auto_reset_retry = true;
+@@ -2801,7 +2899,7 @@ impl DrasiQuery {
+                 // Store bootstrap channel if provided
+                 // Also initialize bootstrap state only for sources that support bootstrap
+                 if let Some(bootstrap_rx) = subscription_response.bootstrap_receiver {
+-                    bootstrap_channels.push((
++                    bootstrap_channels.push(BootstrapInput::new(
+                         source_id.clone(),
+                         bootstrap_rx,
+                         subscription_response.bootstrap_result_receiver,
+@@ -2916,408 +3014,97 @@ impl DrasiQuery {
+         // Wrap continuous_query in Arc for sharing across tasks
+         let continuous_query = Arc::new(continuous_query);
+ 
+-        // Gate that blocks the streaming event processor until bootstrap completes.
+-        // Events buffer safely in the priority queue during bootstrap.
+-        let bootstrap_gate = Arc::new(Notify::new());
+-
+-        // NEW: Handle bootstrap channels
+-        if !bootstrap_channels.is_empty() {
+-            info!(
+-                "Query '{}' starting bootstrap from {} sources",
+-                self.base.config.id,
+-                bootstrap_channels.len()
+-            );
+-
+-            // Emit bootstrapStarted control signal
+-            let mut metadata = HashMap::new();
+-            metadata.insert(
+-                "control_signal".to_string(),
+-                serde_json::json!("bootstrapStarted"),
+-            );
+-            metadata.insert(
+-                "source_count".to_string(),
+-                serde_json::json!(bootstrap_channels.len()),
++        if has_persistent_backend {
++            anyhow::ensure!(
++                sources_to_subscribe.iter().all(|(id, _, settings)| {
++                    !settings.enable_bootstrap
++                        || settings.resume_sequence.is_some()
++                        || settings.resume_from.is_some()
++                        || bootstrap_channels
++                            .iter()
++                            .any(|input| &input.source_id == id)
++                }),
++                "Query '{}' is missing a requested persistent bootstrap stream",
++                self.base.config.id
+             );
+-
+-            let control_result = QueryResult::new(
+-                self.base.config.id.clone(),
+-                0,
+-                chrono::Utc::now(),
+-                vec![],
+-                metadata,
++            anyhow::ensure!(
++                bootstrap_channels.is_empty() || !existing_only,
++                "ExistingOnly cannot initialize a new bootstrap"
+             );
+-
+-            // Dispatch the control signal to all subscribed reactions
+-            self.base.dispatch_query_result(control_result).await.ok();
+-            info!(
+-                "[BOOTSTRAP] Emitted bootstrapStarted signal for query '{}'",
++            anyhow::ensure!(
++                bootstrap_channels.iter().all(|input| {
++                    sources_to_subscribe.iter().any(|(id, _, settings)| {
++                        id == &input.source_id
++                            && settings.enable_bootstrap
++                            && settings.resume_from.is_none()
++                            && settings.resume_sequence.is_none()
++                    })
++                }),
++                "Query '{}' received an unrequested bootstrap stream",
+                 self.base.config.id
+             );
+-
+-            // Process bootstrap events from each source
+-            let continuous_query_clone = continuous_query.clone();
+-            let base_dispatchers = self.base.dispatchers.clone();
+-            let query_id = self.base.config.id.clone();
+-            let bootstrap_state = self.bootstrap_state.clone();
+-            let instance_id = self.instance_id.clone();
+-            let bootstrap_output_state = self.output_state.clone();
+-
+-            let mut bootstrap_tasks = tokio::task::JoinSet::new();
+-
+-            for (source_id, mut bootstrap_rx, bootstrap_result_rx) in bootstrap_channels {
+-                // Mark source bootstrap as in progress
+-                bootstrap_state
+-                    .write()
+-                    .await
+-                    .insert(source_id.to_string(), BootstrapPhase::InProgress);
+-
+-                info!(
+-                    "[BOOTSTRAP] Query '{query_id}' processing bootstrap from source '{source_id}'"
+-                );
+-
+-                let continuous_query_ref = continuous_query_clone.clone();
+-                let query_id_clone = query_id.clone();
+-                let source_id_clone = source_id.clone();
+-                let bootstrap_state_clone = bootstrap_state.clone();
+-                let instance_id_clone = instance_id.clone();
+-                let output_state_clone = bootstrap_output_state.clone();
+-
+-                let span = tracing::info_span!(
+-                    "query_bootstrap",
+-                    instance_id = %instance_id_clone,
+-                    component_id = %query_id,
+-                    component_type = "query"
+-                );
+-                bootstrap_tasks.spawn(
+-                    async move {
+-                        let mut count = 0u64;
+-
+-                        while let Some(bootstrap_event) = bootstrap_rx.recv().await {
+-                            count += 1;
+-
+-                            // Process bootstrap change through ContinuousQuery
+-                            match continuous_query_ref
+-                                .process_source_change(bootstrap_event.change)
+-                                .await
+-                            {
+-                                Ok(results) => {
+-                                    if !results.is_empty() {
+-                                        debug!(
+-                                            "[BOOTSTRAP] Query '{}' received {} results from bootstrap event {}",
+-                                            query_id_clone, results.len(), count
+-                                        );
+-
+-                                        // Convert results to ResultDiffs and apply to output state.
+-                                        // During bootstrap, we only update the result set (no outbox
+-                                        // push, no sequence increment, no dispatch to reactions).
+-                                        let diffs: Vec<ResultDiff> = results
+-                                            .iter()
+-                                            .map(|ctx| match ctx {
+-                                                QueryPartEvaluationContext::Adding { after, row_signature } => {
+-                                                    ResultDiff::Add {
+-                                                        data: convert_query_variables_to_json(after),
+-                                                        row_signature: *row_signature,
+-                                                    }
+-                                                }
+-                                                QueryPartEvaluationContext::Removing { before, row_signature } => {
+-                                                    ResultDiff::Delete {
+-                                                        data: convert_query_variables_to_json(before),
+-                                                        row_signature: *row_signature,
+-                                                    }
+-                                                }
+-                                                QueryPartEvaluationContext::Updating { before, after, row_signature } => {
+-                                                    let after_json = convert_query_variables_to_json(after);
+-                                                    ResultDiff::Update {
+-                                                        data: after_json.clone(),
+-                                                        before: convert_query_variables_to_json(before),
+-                                                        after: after_json,
+-                                                        grouping_keys: None,
+-                                                        row_signature: *row_signature,
+-                                                    }
+-                                                }
+-                                                QueryPartEvaluationContext::Aggregation { before, after, row_signature, .. } => {
+-                                                    ResultDiff::Aggregation {
+-                                                        before: before.as_ref().map(convert_query_variables_to_json),
+-                                                        after: convert_query_variables_to_json(after),
+-                                                        row_signature: *row_signature,
+-                                                    }
+-                                                }
+-                                                QueryPartEvaluationContext::Noop => ResultDiff::Noop,
+-                                            })
+-                                            .collect();
+-
+-                                        let mut state = output_state_clone.write().await;
+-                                        state.apply_diffs(&diffs);
+-                                    }
+-                                }
+-                                Err(e) => {
+-                                    error!(
+-                                        "[BOOTSTRAP] Query '{query_id_clone}' failed to process bootstrap event from source '{source_id_clone}': {e}"
+-                                    );
+-                                }
+-                            }
+-                        }
+-
+-                        info!(
+-                            "[BOOTSTRAP] Query '{query_id_clone}' completed bootstrap from source '{source_id_clone}' ({count} events)"
+-                        );
+-
+-                        // Mark source bootstrap as completed
+-                        {
+-                            let mut state = bootstrap_state_clone.write().await;
+-                            state.insert(source_id_clone.to_string(), BootstrapPhase::Completed);
+-                        }
+-
+-                        // Await the BootstrapResult from the source's bootstrap provider.
+-                        // This carries the optional source_position snapshot boundary.
+-                        // A provider failure (Ok(Err)) or a dropped result channel
+-                        // (Err) is propagated as an Err so the supervisor can
+-                        // transition the query to the Error state. Errors are carried
+-                        // as anyhow::Error to preserve the context chain, matching the
+-                        // internal-module convention.
+-                        let bootstrap_result: anyhow::Result<Option<crate::bootstrap::BootstrapResult>> =
+-                            if let Some(rx) = bootstrap_result_rx {
+-                                match rx.await {
+-                                    Ok(Ok(result)) => {
+-                                        debug!(
+-                                            "[BOOTSTRAP] Query '{}' received handover from source '{}': \
+-                                             source_position={:?}",
+-                                            query_id_clone, source_id_clone,
+-                                            result.source_position.as_ref().map(|p| p.len())
+-                                        );
+-                                        Ok(Some(result))
+-                                    }
+-                                    Ok(Err(e)) => {
+-                                        error!(
+-                                            "[BOOTSTRAP] Query '{query_id_clone}' bootstrap provider failed for source '{source_id_clone}': {e:#}"
+-                                        );
+-                                        Err(e).context(format!("source '{source_id_clone}'"))
+-                                    }
+-                                    Err(_) => {
+-                                        // The sender was dropped without producing a
+-                                        // result. This is a silent-failure path (e.g. a
+-                                        // provider task panicked before sending), so
+-                                        // treat it as a bootstrap failure rather than
+-                                        // letting the query proceed to Running.
+-                                        error!(
+-                                            "[BOOTSTRAP] Query '{query_id_clone}' bootstrap result channel dropped for source '{source_id_clone}' (provider may have failed)"
+-                                        );
+-                                        Err(anyhow::anyhow!(
+-                                            "source '{source_id_clone}': bootstrap result channel dropped without a result"
+-                                        ))
+-                                    }
+-                                }
+-                            } else {
+-                                Ok(None)
+-                            };
+-
+-                        (source_id_clone, bootstrap_result)
+-                    }
+-                    .instrument(span),
+-                );
+-            }
+-            *self.bootstrap_tasks.write().await = bootstrap_tasks;
+-
+-            // Supervisor task: joins all bootstrap tasks, computes handover
+-            // checkpoints, emits the bootstrapCompleted signal, and opens the gate.
+-            // Also handles panics by transitioning to Error.
+-            {
+-                let bootstrap_gate_clone = bootstrap_gate.clone();
+-                let reporter_clone = self.base.status_handle();
+-                let query_id_clone = self.base.config.id.clone();
+-                let instance_id_clone = self.instance_id.clone();
+-                let base_dispatchers_clone = base_dispatchers.clone();
+-                let checkpoint_store_for_supervisor = checkpoint_store.clone();
+-                let session_control_for_supervisor = session_control.clone();
+-                let bootstrap_tasks = self.bootstrap_tasks.clone();
+-
+-                let span = tracing::info_span!(
+-                    "bootstrap_supervisor",
+-                    instance_id = %instance_id_clone,
+-                    component_id = %query_id_clone,
+-                    component_type = "query"
++        }
++        let bootstrap_run = if bootstrap_channels.is_empty() && !initialize_output {
++            None
++        } else {
++            if !bootstrap_channels.is_empty() {
++                let mut metadata = HashMap::new();
++                metadata.insert(
++                    "control_signal".to_string(),
++                    serde_json::json!("bootstrapStarted"),
+                 );
+-                let supervisor_handle = tokio::spawn(
+-                    async move {
+-                        let join_results = {
+-                            let mut tasks = bootstrap_tasks.write().await;
+-                            let mut results = Vec::new();
+-                            while let Some(result) = tasks.join_next().await {
+-                                results.push(result);
+-                            }
+-                            results
+-                        };
+-                        let panic_count = join_results.iter().filter(|r| matches!(r, Err(e) if e.is_panic())).count();
+-
+-                        // Collect bootstrap provider failures reported by the per-source
+-                        // tasks. Each error already carries the source id via anyhow
+-                        // context; render the full chain single-line with `{:#}`.
+-                        let failures: Vec<String> = join_results
+-                            .iter()
+-                            .filter_map(|r| r.as_ref().ok())
+-                            .filter_map(|(_, result)| {
+-                                result.as_ref().err().map(|e| format!("{e:#}"))
+-                            })
+-                            .collect();
+-
+-                        if panic_count > 0 || !failures.is_empty() {
+-                            let mut details = Vec::new();
+-                            if panic_count > 0 {
+-                                details.push(format!("{panic_count} task(s) panicked"));
+-                            }
+-                            details.extend(failures.iter().cloned());
+-                            let detail = details.join("; ");
+-
+-                            error!(
+-                                "[BOOTSTRAP] Query '{query_id_clone}' bootstrap failed ({detail}), \
+-                                 transitioning to Error and opening gate"
+-                            );
+-
+-                            // The same failure reason is reported in the status so callers
+-                            // of get_query_status() can see why bootstrap failed without
+-                            // having to correlate against logs. This is an embedded,
+-                            // in-process API and the identical text is already emitted to
+-                            // the operator log above, so the status carries no information
+-                            // not already present there.
+-                            reporter_clone.set_status(
+-                                ComponentStatus::Error,
+-                                Some(format!("Bootstrap failed: {detail}")),
+-                            ).await;
+-
+-                            // Open the gate so the processor doesn't block
+-                            bootstrap_gate_clone.notify_one();
+-                            return;
+-                        }
+-
+-                        // Persist the bootstrap snapshot boundary (source_position)
+-                        // as a recovery checkpoint so a crash after bootstrap but
+-                        // before the first streaming event doesn't lose progress and
+-                        // avoids a redundant re-bootstrap. Bootstrap events don't go
+-                        // through dispatch_event(), so there is no sequence yet; use
+-                        // 0 as the sentinel sequence alongside the source_position.
+-                        let mut handover_positions: std::collections::HashMap<String, Option<bytes::Bytes>> =
+-                            std::collections::HashMap::new();
+-
+-                        for (source_id, bootstrap_result) in join_results.iter().filter_map(|r| r.as_ref().ok()) {
+-                            if let Ok(Some(br)) = bootstrap_result {
+-                                if let Some(pos) = &br.source_position {
+-                                    // Validate source_position size (same limit as dispatch_event)
+-                                    if pos.len() > crate::sources::base::SourceBase::MAX_SOURCE_POSITION_BYTES {
+-                                        warn!(
+-                                            "[BOOTSTRAP] Query '{query_id_clone}' source '{source_id}' \
+-                                             bootstrap source_position is {} bytes (> {} limit); \
+-                                             dropping position, no recovery checkpoint persisted",
+-                                            pos.len(),
+-                                            crate::sources::base::SourceBase::MAX_SOURCE_POSITION_BYTES
+-                                        );
+-                                    } else {
+-                                        handover_positions.insert(source_id.clone(), Some(pos.clone()));
+-                                    }
+-                                }
+-                            }
+-                        }
+-
+-                        info!(
+-                            "[BOOTSTRAP] Query '{query_id_clone}' all sources completed bootstrap, \
+-                             {} recovery checkpoint(s) to persist",
+-                            handover_positions.len()
+-                        );
+-
+-                        // Persist recovery checkpoints before opening the gate.
+-                        // This ensures crash-after-bootstrap-before-first-streaming-event
+-                        // doesn't lose progress and avoids a redundant re-bootstrap.
+-                        if !handover_positions.is_empty() {
+-                            let session_ok = if let Some(sc) = &session_control_for_supervisor {
+-                                match sc.begin().await {
+-                                    Ok(()) => true,
+-                                    Err(e) => {
+-                                        warn!(
+-                                            "[BOOTSTRAP] Query '{query_id_clone}' failed to begin session \
+-                                             for handover persistence: {e}; checkpoints will not be \
+-                                             persisted until the first streaming event"
+-                                        );
+-                                        false
+-                                    }
+-                                }
+-                            } else {
+-                                true // no session control needed (e.g. in-memory store)
+-                            };
+-
+-                            if session_ok {
+-                                for (source_id, position) in &handover_positions {
+-                                    if let Err(e) = checkpoint_store_for_supervisor
+-                                        .stage_checkpoint(source_id, 0, position.as_ref())
+-                                        .await
+-                                    {
+-                                        warn!(
+-                                            "[BOOTSTRAP] Query '{query_id_clone}' failed to persist \
+-                                             handover checkpoint for '{source_id}': {e}"
+-                                        );
+-                                    }
+-                                }
+-                                if let Some(sc) = &session_control_for_supervisor {
+-                                    if let Err(e) = sc.commit().await {
+-                                        warn!(
+-                                            "[BOOTSTRAP] Query '{query_id_clone}' failed to commit \
+-                                             handover checkpoints: {e}"
+-                                        );
+-                                    }
+-                                }
+-                            }
+-                        }
+-
+-                        // Emit bootstrapCompleted control signal
+-                        let mut metadata = HashMap::new();
+-                        metadata.insert(
+-                            "control_signal".to_string(),
+-                            serde_json::json!("bootstrapCompleted"),
+-                        );
+-
+-                        let control_result = QueryResult::new(
+-                            query_id_clone.clone(),
+-                            0,
+-                            chrono::Utc::now(),
+-                            vec![],
+-                            metadata,
+-                        );
+-
+-                        let arc_result = Arc::new(control_result);
+-
+-                        // Dispatch bootstrapCompleted signal to all reactions
+-                        let dispatchers = base_dispatchers_clone.read().await;
+-                        let mut dispatched = false;
+-                        for dispatcher in dispatchers.iter() {
+-                            if dispatcher.dispatch_change(arc_result.clone()).await.is_ok() {
+-                                dispatched = true;
+-                            }
+-                        }
+-
+-                        if !dispatched {
+-                            debug!(
+-                                "No reactions subscribed to query '{query_id_clone}' for bootstrapCompleted signal"
+-                            );
+-                        } else {
+-                            info!(
+-                                "[BOOTSTRAP] Emitted bootstrapCompleted signal for query '{query_id_clone}'"
+-                            );
+-                        }
+-
+-                        // Open the bootstrap gate so the event processor can start
+-                        bootstrap_gate_clone.notify_one();
+-                        info!("[BOOTSTRAP] Query '{query_id_clone}' bootstrap gate opened");
+-                    }
+-                    .instrument(span),
++                metadata.insert(
++                    "source_count".to_string(),
++                    serde_json::json!(bootstrap_channels.len()),
+                 );
+-                *self.bootstrap_supervisor.write().await = Some(supervisor_handle);
++                self.base
++                    .dispatch_query_result(QueryResult::new(
++                        self.base.config.id.clone(),
++                        0,
++                        chrono::Utc::now(),
++                        vec![],
++                        metadata,
++                    ))
++                    .await?;
+             }
+-        } else {
+-            info!(
+-                "Query '{}' no bootstrap channels, skipping bootstrap",
+-                self.base.config.id
+-            );
+-            // No bootstrap needed — open the gate immediately
+-            bootstrap_gate.notify_one();
+-        }
++            Some(BootstrapRun {
++                query_id: self.base.config.id.clone(),
++                inputs: bootstrap_channels,
++                source_ids: self
++                    .base
++                    .config
++                    .sources
++                    .iter()
++                    .map(|s| s.source_id.clone())
++                    .collect(),
++                query: continuous_query.clone(),
++                output: self.output_state.clone(),
++                state: self.bootstrap_state.clone(),
++                persistence: if has_persistent_backend {
++                    let live_results_writer = self.live_results_writer.read().await.clone();
++                    let outbox_writer = self.outbox_writer.read().await.clone();
++                    anyhow::ensure!(
++                        live_results_writer.is_some() && outbox_writer.is_some(),
++                        "Persistent initial snapshots require live-results and outbox writers"
++                    );
++                    Some(BootstrapPersistence {
++                        stores: DurableOutputStores {
++                            bootstrap: BootstrapRecovery::Published,
++                            checkpoint_store: checkpoint_store.clone(),
++                            outbox_writer,
++                            live_results_writer,
++                        },
++                        session: session_control
++                            .clone()
++                            .context("Persistent bootstrap requires session control")?,
++                        config_hash: self.config_hash,
++                    })
++                } else {
++                    None
++                },
++            })
++        };
++        let publication_for_processor = self.publication.clone();
+ 
+         // Spawn FutureQueueSource forwarder task (same pattern as other sources)
+         {
+@@ -3375,53 +3162,75 @@ impl DrasiQuery {
+         );
+         let handle = tokio::spawn(
+             async move {
+-                info!("Query '{query_id}' waiting for bootstrap gate before processing events");
+-
+-                // Wait for bootstrap to complete (or immediate signal if no bootstrap).
+-                // If shutdown arrives while waiting, exit cleanly.
+-                tokio::select! {
+-                    biased;
+-
+-                    _ = &mut shutdown_rx => {
+-                        info!(
+-                            "Query '{query_id}' received shutdown during bootstrap wait, exiting"
+-                        );
++                let bootstrapped = bootstrap_run.as_ref().is_some_and(|run| !run.inputs.is_empty());
++                if let Some(bootstrap_run) = bootstrap_run {
++                    let result = std::panic::AssertUnwindSafe(
++                        bootstrap_run.run(&mut shutdown_rx)
++                    ).catch_unwind().await;
++                    let result = match result {
++                        Ok(result) => result,
++                        Err(panic) => {
++                            let message = format!("Query '{query_id}' bootstrap processor panicked");
++                            error!("{message}");
++                            let _publication = publication_for_processor.lock().await;
++                            if reporter_for_processor.get_status().await == ComponentStatus::Starting {
++                                reporter_for_processor.set_status(
++                                    ComponentStatus::Error, Some(message),
++                                ).await;
++                            }
++                            std::panic::resume_unwind(panic);
++                        }
++                    };
++                    match result {
++                        Ok(bootstrap::BootstrapOutcome::Complete) => {}
++                        Ok(bootstrap::BootstrapOutcome::Stopped) => return,
++                        Err(error) => {
++                            let message = format!("Query '{query_id}' bootstrap failed: {error:#}");
++                            error!("{message}");
++                            let _publication = publication_for_processor.lock().await;
++                            if reporter_for_processor.get_status().await == ComponentStatus::Starting {
++                                reporter_for_processor.set_status(
++                                    ComponentStatus::Error, Some(message),
++                                ).await;
++                            }
++                            return;
++                        }
++                    }
++                }
++                {
++                    let _publication = publication_for_processor.lock().await;
++                    if reporter_for_processor.get_status().await != ComponentStatus::Starting
++                        || bootstrap::stopping(&mut shutdown_rx)
++                    {
+                         return;
+                     }
+-
+-                    _ = bootstrap_gate.notified() => {
+-                        info!("Query '{query_id}' bootstrap gate opened, starting event processing");
++                    if let Err(error) = fq_source_for_processor.start().await {
++                        let message = format!("Query '{query_id}' future queue start failed: {error}");
++                        error!("{message}");
++                        reporter_for_processor.set_status(
++                            ComponentStatus::Error, Some(message),
++                        ).await;
++                        return;
+                     }
+-                }
+-
+-                // Bootstrap complete — transition to Running only if still Starting.
+-                // If stop() was called during bootstrap, status may already be
+-                // Stopping and we must not overwrite it.
+-                let should_run = matches!(reporter_for_processor.get_status().await, ComponentStatus::Starting);
+-
+-                if should_run {
+                     reporter_for_processor.set_status(
+-                        ComponentStatus::Running,
+-                        Some("Query started successfully".to_string()),
++                        ComponentStatus::Running, Some("Query started successfully".to_string()),
+                     ).await;
+-                } else {
+-                    let current = reporter_for_processor.get_status().await;
+-                    warn!(
+-                        "Query '{query_id}' bootstrap completed but status is {current:?}, \
+-                         skipping transition to Running"
+-                    );
+                 }
+-
+-                // Start FutureQueueSource after bootstrap completes
+-                if let Err(e) = fq_source_for_processor.start().await {
+-                    error!("Query '{query_id}' failed to start FutureQueueSource: {e}");
+-                    reporter_for_processor
+-                        .set_status(
+-                            ComponentStatus::Error,
+-                            Some(format!("Future queue start failed: {e}")),
+-                        )
+-                        .await;
+-                    return;
++                if bootstrapped {
++                    let mut metadata = HashMap::new();
++                    metadata.insert(
++                        "control_signal".to_string(), serde_json::json!("bootstrapCompleted"),
++                    );
++                    let result = Arc::new(QueryResult::new(
++                        query_id.clone(), 0, chrono::Utc::now(), vec![], metadata,
++                    ));
++                    for dispatcher in base_dispatchers.read().await.iter() {
++                        if let Err(error) = dispatcher.dispatch_change(result.clone()).await {
++                            debug!("Query '{query_id}' bootstrap control dispatch failed: {error}");
++                        }
++                    }
++                    let state = output_state.read().await;
++                    output_metrics_for_processor.record_live_results_count(state.results_len());
+                 }
+ 
+                 info!("Query '{query_id}' starting priority queue event processor");
+@@ -3678,44 +3487,48 @@ impl Query for DrasiQuery {
+     }
+ 
+     async fn stop(&self) -> Result<()> {
+-        let status = self.base.get_status().await;
+-        if status == ComponentStatus::Stopped {
+-            return Ok(());
+-        }
+-        // Like the graph, allow same-state updates; otherwise use its transition rules.
+-        anyhow::ensure!(
+-            status == ComponentStatus::Stopping
+-                || is_valid_transition(&ComponentKind::Query, &status, &ComponentStatus::Stopping),
+-            "Cannot stop query '{}' while it is {status:?}",
+-            self.base.config.id
+-        );
+-
+-        log_component_stop("Query", &self.base.config.id);
++        let _operation = self.operations.lock().await;
++        {
++            let _publication = self.publication.lock().await;
++            let status = self.base.get_status().await;
++            if status == ComponentStatus::Stopped {
++                return Ok(());
++            }
++            // Like the graph, allow same-state updates; otherwise use its transition rules.
++            anyhow::ensure!(
++                status == ComponentStatus::Stopping
++                    || is_valid_transition(
++                        &ComponentKind::Query,
++                        &status,
++                        &ComponentStatus::Stopping
++                    ),
++                "Cannot stop query '{}' while it is {status:?}",
++                self.base.config.id
++            );
+ 
+-        // Error is not a quiescent state: failed queries need the same resource
+-        // cleanup as running queries before they can report Stopped.
+-        self.base
+-            .set_status(
+-                ComponentStatus::Stopping,
+-                Some("Stopping query".to_string()),
+-            )
+-            .await;
++            log_component_stop("Query", &self.base.config.id);
+ 
+-        // Join the supervisor before taking its worker set; abort alone does not
+-        // release the worker futures or their persistent index handles.
++            // Error is not a quiescent state: failed queries need the same resource
++            // cleanup as running queries before they can report Stopped.
++            self.base
++                .set_status(
++                    ComponentStatus::Stopping,
++                    Some("Stopping query".to_string()),
++                )
++                .await;
++        }
+         if let Some(handle) = self.bootstrap_supervisor.write().await.take() {
+             handle.abort();
+-            if let Err(e) = handle.await {
+-                if !e.is_cancelled() {
+-                    error!(
+-                        "Query '{}' bootstrap supervisor panicked: {e}",
+-                        self.base.config.id
+-                    );
++            if let Err(error) = handle.await {
++                if !error.is_cancelled() {
++                    return Err(error).context("Query bootstrap supervisor join failed");
+                 }
+             }
+         }
+         self.bootstrap_tasks.write().await.shutdown().await;
+ 
++        self.base.stop_task().await?;
++
+         // Drain and abort source subscription forwarders so they don't leak across restarts
+         let subscription_handles: Vec<_> = {
+             let mut tasks = self.subscription_tasks.write().await;
+@@ -3727,10 +3540,6 @@ impl Query for DrasiQuery {
+             let _ = handle.await;
+         }
+ 
+-        // The processor can start the future queue, so join it before stopping
+-        // the poller and before reporting Stopped.
+-        self.base.stop_task().await?;
+-
+         // Stop the FutureQueueSource polling task
+         if let Some(fq) = self.future_queue_source.write().await.take() {
+             fq.stop().await;
+@@ -3875,6 +3684,7 @@ impl Query for DrasiQuery {
+     }
+ 
+     async fn prepare_for_removal_preserving_state(&self) -> Result<()> {
++        let _operation = self.operations.lock().await;
+         anyhow::ensure!(
+             self.status().await == ComponentStatus::Stopped,
+             "Query '{}' runtime must be Stopped before removal preserving state",
+@@ -4284,6 +4094,7 @@ impl QueryManager {
+                                 format!("Query '{id}' failed to clear checkpoints on removal")
+                             })?;
+                         let stores = DurableOutputStores {
++                            bootstrap: BootstrapRecovery::NotRequired,
+                             checkpoint_store: checkpoint_store.clone(),
+                             outbox_writer: created.outbox_writer.clone(),
+                             live_results_writer: created.live_results_writer.clone(),
+@@ -4497,7 +4308,7 @@ impl QueryManager {
+         .await
+     }
+ 
+-    /// Stop all running, starting, or failed queries.
++    /// Stop all running, starting, stopping, or failed queries.
+     ///
+     /// # Errors
+     /// Returns an error listing any queries that failed to stop.
+@@ -4518,7 +4329,10 @@ impl QueryManager {
+                 let graph = self.graph.read().await;
+                 graph
+                     .get_component(&id)
+-                    .map(|n| is_valid_transition(&n.kind, &n.status, &ComponentStatus::Stopping))
++                    .map(|n| {
++                        n.status == ComponentStatus::Stopping
++                            || is_valid_transition(&n.kind, &n.status, &ComponentStatus::Stopping)
++                    })
+                     .unwrap_or(false)
+             };
+ 
+diff --git a/lib/src/queries/manager/bootstrap.rs b/lib/src/queries/manager/bootstrap.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..236c0b9ceb2869edc7142326aa4beb80c3a39964
+--- /dev/null
++++ b/lib/src/queries/manager/bootstrap.rs
+@@ -0,0 +1,323 @@
++// Copyright 2025 The Drasi Authors.
++//
++// Licensed under the Apache License, Version 2.0 (the "License");
++// you may not use this file except in compliance with the License.
++// You may obtain a copy of the License at
++//
++//     http://www.apache.org/licenses/LICENSE-2.0
++//
++// Unless required by applicable law or agreed to in writing, software
++// distributed under the License is distributed on an "AS IS" BASIS,
++// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++// See the License for the specific language governing permissions and
++// limitations under the License.
++
++use super::*;
++use crate::bootstrap::BootstrapResult;
++use futures::{stream::FuturesUnordered, StreamExt};
++use tokio::sync::{mpsc, oneshot};
++
++pub(super) struct BootstrapInput {
++    pub(super) source_id: String,
++    events: mpsc::Receiver<BootstrapEvent>,
++    result: Option<oneshot::Receiver<Result<BootstrapResult>>>,
++    count: usize,
++}
++
++impl BootstrapInput {
++    pub(super) fn new(
++        source_id: String,
++        events: mpsc::Receiver<BootstrapEvent>,
++        result: Option<oneshot::Receiver<Result<BootstrapResult>>>,
++    ) -> Self {
++        Self {
++            source_id,
++            events,
++            result,
++            count: 0,
++        }
++    }
++
++    async fn receive(mut self) -> (Self, Result<BootstrapStep>) {
++        let step = if let Some(event) = self.events.recv().await {
++            Ok(BootstrapStep::Change(event))
++        } else if let Some(result) = self.result.take() {
++            match result.await {
++                Ok(result) => result
++                    .with_context(|| format!("Bootstrap source '{}' failed", self.source_id))
++                    .map(|result| BootstrapStep::Complete(Some(result))),
++                Err(error) => Err(anyhow::anyhow!(
++                    "Bootstrap source '{}' dropped its completion channel: {error}",
++                    self.source_id
++                )),
++            }
++        } else {
++            Ok(BootstrapStep::Complete(None))
++        };
++        (self, step)
++    }
++}
++
++enum BootstrapStep {
++    Change(BootstrapEvent),
++    Complete(Option<BootstrapResult>),
++}
++
++pub(super) enum BootstrapOutcome {
++    Complete,
++    Stopped,
++}
++
++pub(super) struct BootstrapPersistence {
++    pub(super) stores: DurableOutputStores,
++    pub(super) session: Arc<dyn SessionControl>,
++    pub(super) config_hash: u64,
++}
++
++pub(super) struct BootstrapRun {
++    pub(super) query_id: String,
++    pub(super) inputs: Vec<BootstrapInput>,
++    pub(super) source_ids: Vec<String>,
++    pub(super) query: Arc<ContinuousQuery>,
++    pub(super) output: Arc<RwLock<QueryOutputState>>,
++    pub(super) state: Arc<RwLock<HashMap<String, BootstrapPhase>>>,
++    pub(super) persistence: Option<BootstrapPersistence>,
++}
++
++pub(super) fn stopping(shutdown: &mut oneshot::Receiver<()>) -> bool {
++    !matches!(
++        shutdown.try_recv(),
++        Err(oneshot::error::TryRecvError::Empty)
++    )
++}
++
++impl BootstrapRun {
++    pub(super) async fn run(
++        self,
++        shutdown: &mut oneshot::Receiver<()>,
++    ) -> Result<BootstrapOutcome> {
++        if stopping(shutdown) {
++            return Ok(BootstrapOutcome::Stopped);
++        }
++        let mut image = self.output.read().await.clone();
++        let mut handovers: HashMap<_, _> = self
++            .source_ids
++            .iter()
++            .cloned()
++            .map(|id| (id, None))
++            .collect();
++        let mut seen = HashSet::new();
++        for input in &self.inputs {
++            anyhow::ensure!(
++                handovers.contains_key(&input.source_id) && seen.insert(input.source_id.clone()),
++                "Query '{}' has an unknown or duplicate bootstrap source '{}'",
++                self.query_id,
++                input.source_id
++            );
++            anyhow::ensure!(
++                self.persistence.is_none() || input.result.is_some(),
++                "Persistent bootstrap source '{}' has no completion channel",
++                input.source_id
++            );
++        }
++        if let Some(persistence) = &self.persistence {
++            anyhow::ensure!(
++                image.as_of_sequence() == 0 && image.outbox_len() == 0 && image.results_len() == 0,
++                "Query '{}' cannot bootstrap over existing output",
++                self.query_id
++            );
++            let pending = bootstrap_in_progress_hash(persistence.config_hash);
++            persistence
++                .stores
++                .checkpoint_store
++                .write_config_hash(pending)
++                .await
++                .context("Failed to fence durable bootstrap")?;
++            anyhow::ensure!(
++                persistence
++                    .stores
++                    .checkpoint_store
++                    .read_config_hash()
++                    .await?
++                    == Some(pending),
++                "Durable bootstrap fence was not persisted"
++            );
++        }
++        {
++            let mut state = self.state.write().await;
++            for input in &self.inputs {
++                state.insert(input.source_id.clone(), BootstrapPhase::InProgress);
++            }
++        }
++
++        // These futures only receive channels. Evaluation and storage have one owner.
++        let mut waiting = FuturesUnordered::new();
++        for input in self.inputs {
++            waiting.push(input.receive());
++        }
++        while let Some((mut input, step)) = tokio::select! {
++            biased;
++            _ = &mut *shutdown => return Ok(BootstrapOutcome::Stopped),
++            step = waiting.next() => step,
++        } {
++            if stopping(shutdown) {
++                return Ok(BootstrapOutcome::Stopped);
++            }
++            match step? {
++                BootstrapStep::Change(event) => {
++                    anyhow::ensure!(
++                        event.source_id == input.source_id,
++                        "Bootstrap event source '{}' does not match '{}'",
++                        event.source_id,
++                        input.source_id
++                    );
++                    input.count = input
++                        .count
++                        .checked_add(1)
++                        .context("Bootstrap count overflow")?;
++                    let results = self
++                        .query
++                        .process_source_change(event.change)
++                        .await
++                        .with_context(|| {
++                            format!(
++                                "Query '{}' failed to evaluate bootstrap source '{}'",
++                                self.query_id, input.source_id
++                            )
++                        })?;
++                    image.apply_diffs(&evaluation_contexts_to_diffs(&results));
++                    waiting.push(input.receive());
++                }
++                BootstrapStep::Complete(result) => {
++                    if let Some(result) = result {
++                        anyhow::ensure!(
++                            result.event_count == input.count,
++                            "Bootstrap source '{}' reported {} events but delivered {}",
++                            input.source_id,
++                            result.event_count,
++                            input.count
++                        );
++                        anyhow::ensure!(
++                            result.source_position.as_ref().map_or(true, |position| {
++                                position.len()
++                                    <= crate::sources::base::SourceBase::MAX_SOURCE_POSITION_BYTES
++                            }),
++                            "Bootstrap source '{}' supplied an oversized handover position",
++                            input.source_id
++                        );
++                        anyhow::ensure!(
++                            self.persistence.is_none() || result.source_position.is_some(),
++                            "Persistent bootstrap source '{}' has no replayable handover",
++                            input.source_id
++                        );
++                        handovers.insert(input.source_id, result.source_position);
++                    }
++                }
++            }
++        }
++
++        if stopping(shutdown) {
++            return Ok(BootstrapOutcome::Stopped);
++        }
++        if let Some(persistence) = &self.persistence {
++            let encoded: Vec<_> = image
++                .clone_results()
++                .iter()
++                .map(|(signature, value)| rmp_serde::to_vec(value).map(|data| (*signature, data)))
++                .collect::<Result<_, _>>()?;
++            let mutations: Vec<_> = encoded
++                .iter()
++                .map(|(signature, data)| RowMutation {
++                    row_signature: *signature,
++                    data: Some(data.as_slice()),
++                })
++                .collect();
++            let writer = persistence
++                .stores
++                .live_results_writer
++                .as_ref()
++                .context("Persistent bootstrap requires a live-results writer")?;
++            let session = SessionGuard::begin(persistence.session.clone())
++                .await
++                .context("Failed to begin bootstrap publication")?;
++            writer
++                .apply_mutations(&self.query_id, &mutations)
++                .await
++                .context("Failed to stage bootstrap rows")?;
++            for (source_id, position) in &handovers {
++                persistence
++                    .stores
++                    .checkpoint_store
++                    .stage_checkpoint(source_id, 0, position.as_ref())
++                    .await
++                    .with_context(|| format!("Failed to stage bootstrap handover '{source_id}'"))?;
++            }
++            persistence
++                .stores
++                .checkpoint_store
++                .stage_result_sequence(&self.query_id, 0)
++                .await
++                .context("Failed to stage bootstrap sequence")?;
++            session
++                .commit()
++                .await
++                .context("Failed to commit bootstrap image")?;
++
++            let checkpoints = persistence
++                .stores
++                .checkpoint_store
++                .read_all_checkpoints()
++                .await?;
++            anyhow::ensure!(
++                handovers.iter().all(|(source_id, position)| {
++                    checkpoints.get(source_id).is_some_and(|checkpoint| {
++                        checkpoint.sequence == 0 && checkpoint.source_position == *position
++                    })
++                }),
++                "Committed bootstrap handovers do not match the publication"
++            );
++            let (rows, outbox, sequence, generation) =
++                load_durable_output(&self.query_id, &persistence.stores, image.outbox_capacity())
++                    .await?;
++            anyhow::ensure!(
++                rows == image.clone_results()
++                    && outbox.is_empty()
++                    && sequence == 0
++                    && generation == image.generation(),
++                "Committed bootstrap output does not match the publication"
++            );
++        }
++        if stopping(shutdown) {
++            return Ok(BootstrapOutcome::Stopped);
++        }
++
++        *self.output.write().await = image;
++        if let Some(persistence) = &self.persistence {
++            // RAM and durable data are coherent even if this standalone write is uncertain.
++            let published = bootstrap_published_hash(persistence.config_hash);
++            persistence
++                .stores
++                .checkpoint_store
++                .write_config_hash(published)
++                .await
++                .context("Failed to publish completed bootstrap")?;
++            anyhow::ensure!(
++                persistence
++                    .stores
++                    .checkpoint_store
++                    .read_config_hash()
++                    .await?
++                    == Some(published),
++                "Completed bootstrap marker was not persisted"
++            );
++        }
++        if stopping(shutdown) {
++            return Ok(BootstrapOutcome::Stopped);
++        }
++        let mut state = self.state.write().await;
++        for source_id in seen {
++            state.insert(source_id, BootstrapPhase::Completed);
++        }
++        Ok(BootstrapOutcome::Complete)
++    }
++}
+diff --git a/lib/src/queries/output_state.rs b/lib/src/queries/output_state.rs
+index 9fded04891b93d46386eae7e5edae33f3f1675db..272c21261ddcfd4a7a8c0f344ade33576c1832f3 100644
+--- a/lib/src/queries/output_state.rs
++++ b/lib/src/queries/output_state.rs
+@@ -371,6 +371,9 @@ pub(crate) fn next_output_generation(persisted: u64, ram: u64) -> u64 {
+ /// Never continue processing with sequence 0 against non-empty durable output.
+ #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+ pub enum DurableOutputInconsistency {
++    /// Bootstrap has no acknowledged durable initial image.
++    #[error("bootstrap has no published durable initial snapshot")]
++    MissingBootstrapSnapshot,
+     /// Durable outbox high-water is ahead of the stored result sequence.
+     #[error("outbox high-water {outbox_hwm} is ahead of stored result sequence {stored_sequence}")]
+     OutboxAheadOfSequence {
+@@ -412,6 +415,13 @@ impl DurableOutputInconsistency {
+     }
+ }
+ 
++#[derive(Clone, Copy, Debug, PartialEq, Eq)]
++pub(crate) enum BootstrapRecovery {
++    NotRequired,
++    Required,
++    Published,
++}
++
+ /// Reconcile durable output high-water marks without lowering either side.
+ ///
+ /// Returns the sequence to install into `QueryOutputState`. The next emitted
+@@ -421,16 +431,24 @@ impl DurableOutputInconsistency {
+ /// Returns [`DurableOutputInconsistency`] if the stored sequence, outbox
+ /// high-water mark, and live row count are not mutually consistent (e.g. a
+ /// gapped or duplicate outbox, an outbox ahead of the stored sequence, missing
+-/// live rows for a stored sequence, or non-empty durable output with sequence 0).
++/// live rows for a stored sequence, or an unpublished bootstrap at sequence 0).
+ pub(crate) fn reconcile_durable_output(
+     stored_sequence: Option<u64>,
+     outbox_sequences: &[u64],
+     live_row_count: usize,
+     live_rows_readable: bool,
++    bootstrap: BootstrapRecovery,
+ ) -> Result<u64, DurableOutputInconsistency> {
+     let stored = stored_sequence.unwrap_or(0);
+ 
+-    if !live_rows_readable && stored > 0 {
++    if stored == 0
++        && (bootstrap == BootstrapRecovery::Required
++            || (bootstrap == BootstrapRecovery::Published && stored_sequence.is_none()))
++    {
++        return Err(DurableOutputInconsistency::MissingBootstrapSnapshot);
++    }
++
++    if !live_rows_readable && (stored > 0 || bootstrap == BootstrapRecovery::Published) {
+         return Err(DurableOutputInconsistency::MissingLiveRows {
+             stored_sequence: stored,
+         });
+@@ -452,7 +470,10 @@ pub(crate) fn reconcile_durable_output(
+     }
+ 
+     let outbox_hwm = retained.last().copied();
+-    if stored == 0 && (live_row_count > 0 || outbox_hwm.is_some()) {
++    if stored == 0
++        && (outbox_hwm.is_some()
++            || (live_row_count > 0 && bootstrap != BootstrapRecovery::Published))
++    {
+         return Err(
+             DurableOutputInconsistency::SequenceZeroAgainstDurableOutput {
+                 live_rows: live_row_count,
+@@ -760,6 +781,29 @@ impl Stream for OutboxStream {
+ #[cfg(test)]
+ mod tests {
+     use super::*;
++
++    #[rstest::rstest]
++    #[case::published_empty(Some(0), &[], 0, true, BootstrapRecovery::Published, Ok(0))]
++    #[case::published_rows(Some(0), &[], 2, true, BootstrapRecovery::Published, Ok(0))]
++    #[case::missing_zero(None, &[], 0, true, BootstrapRecovery::Published, Err(DurableOutputInconsistency::MissingBootstrapSnapshot))]
++    #[case::legacy_absent(None, &[], 0, true, BootstrapRecovery::Required, Err(DurableOutputInconsistency::MissingBootstrapSnapshot))]
++    #[case::legacy_explicit_zero(Some(0), &[], 0, true, BootstrapRecovery::Required, Err(DurableOutputInconsistency::MissingBootstrapSnapshot))]
++    #[case::unreadable_rows(Some(0), &[], 0, false, BootstrapRecovery::Published, Err(DurableOutputInconsistency::MissingLiveRows { stored_sequence: 0 }))]
++    #[case::contradictory_outbox(Some(0), &[1], 2, true, BootstrapRecovery::Published, Err(DurableOutputInconsistency::SequenceZeroAgainstDurableOutput { live_rows: 2, outbox_hwm: Some(1) }))]
++    #[case::live_after_bootstrap(Some(1), &[1], 2, true, BootstrapRecovery::Published, Ok(1))]
++    fn bootstrap_recovery_requires_an_explicit_published_image(
++        #[case] sequence: Option<u64>,
++        #[case] outbox: &[u64],
++        #[case] rows: usize,
++        #[case] readable: bool,
++        #[case] bootstrap: BootstrapRecovery,
++        #[case] expected: Result<u64, DurableOutputInconsistency>,
++    ) {
++        assert_eq!(
++            reconcile_durable_output(sequence, outbox, rows, readable, bootstrap),
++            expected
++        );
++    }
+     use std::collections::HashMap;
+ 
+     fn make_query_result(query_id: &str, diffs: Vec<ResultDiff>) -> QueryResult {
+@@ -1090,19 +1134,35 @@ mod tests {
+ 
+     #[test]
+     fn reconcile_matching_sequence_and_outbox_hwm() {
+-        let seq = reconcile_durable_output(Some(4), &[1, 2, 3, 4], 3, true).unwrap();
++        let seq = reconcile_durable_output(
++            Some(4),
++            &[1, 2, 3, 4],
++            3,
++            true,
++            BootstrapRecovery::NotRequired,
++        )
++        .unwrap();
+         assert_eq!(seq, 4);
+     }
+ 
+     #[test]
+     fn reconcile_does_not_lower_stored_sequence_below_outbox_hwm() {
+-        let seq = reconcile_durable_output(Some(5), &[3, 4], 1, true).unwrap();
++        let seq =
++            reconcile_durable_output(Some(5), &[3, 4], 1, true, BootstrapRecovery::NotRequired)
++                .unwrap();
+         assert_eq!(seq, 5);
+     }
+ 
+     #[test]
+     fn reconcile_outbox_ahead_of_sequence_is_inconsistent() {
+-        let err = reconcile_durable_output(Some(4), &[1, 2, 3, 4, 5], 3, true).unwrap_err();
++        let err = reconcile_durable_output(
++            Some(4),
++            &[1, 2, 3, 4, 5],
++            3,
++            true,
++            BootstrapRecovery::NotRequired,
++        )
++        .unwrap_err();
+         assert_eq!(
+             err,
+             DurableOutputInconsistency::OutboxAheadOfSequence {
+@@ -1114,7 +1174,14 @@ mod tests {
+ 
+     #[test]
+     fn reconcile_gapped_outbox_is_inconsistent() {
+-        let err = reconcile_durable_output(Some(5), &[1, 2, 4, 5], 2, true).unwrap_err();
++        let err = reconcile_durable_output(
++            Some(5),
++            &[1, 2, 4, 5],
++            2,
++            true,
++            BootstrapRecovery::NotRequired,
++        )
++        .unwrap_err();
+         assert!(matches!(
+             err,
+             DurableOutputInconsistency::GappedOutbox { retained } if retained == vec![1, 2, 4, 5]
+@@ -1123,7 +1190,14 @@ mod tests {
+ 
+     #[test]
+     fn reconcile_duplicate_outbox_sequence_is_inconsistent() {
+-        let err = reconcile_durable_output(Some(3), &[1, 2, 2, 3], 2, true).unwrap_err();
++        let err = reconcile_durable_output(
++            Some(3),
++            &[1, 2, 2, 3],
++            2,
++            true,
++            BootstrapRecovery::NotRequired,
++        )
++        .unwrap_err();
+         assert!(matches!(
+             err,
+             DurableOutputInconsistency::GappedOutbox { retained } if retained == vec![1, 2, 2, 3]
+@@ -1132,7 +1206,14 @@ mod tests {
+ 
+     #[test]
+     fn reconcile_missing_live_rows_for_stored_sequence() {
+-        let err = reconcile_durable_output(Some(3), &[1, 2, 3], 0, false).unwrap_err();
++        let err = reconcile_durable_output(
++            Some(3),
++            &[1, 2, 3],
++            0,
++            false,
++            BootstrapRecovery::NotRequired,
++        )
++        .unwrap_err();
+         assert_eq!(
+             err,
+             DurableOutputInconsistency::MissingLiveRows { stored_sequence: 3 }
+@@ -1141,7 +1222,8 @@ mod tests {
+ 
+     #[test]
+     fn reconcile_sequence_zero_against_live_rows_is_inconsistent() {
+-        let err = reconcile_durable_output(None, &[], 2, true).unwrap_err();
++        let err = reconcile_durable_output(None, &[], 2, true, BootstrapRecovery::NotRequired)
++            .unwrap_err();
+         assert_eq!(
+             err,
+             DurableOutputInconsistency::SequenceZeroAgainstDurableOutput {
+@@ -1153,7 +1235,9 @@ mod tests {
+ 
+     #[test]
+     fn reconcile_sequence_zero_against_outbox_is_inconsistent() {
+-        let err = reconcile_durable_output(None, &[1, 2, 3], 0, true).unwrap_err();
++        let err =
++            reconcile_durable_output(None, &[1, 2, 3], 0, true, BootstrapRecovery::NotRequired)
++                .unwrap_err();
+         assert_eq!(
+             err,
+             DurableOutputInconsistency::SequenceZeroAgainstDurableOutput {
+@@ -1165,8 +1249,15 @@ mod tests {
+ 
+     #[test]
+     fn reconcile_empty_durable_output_is_sequence_zero() {
+-        assert_eq!(reconcile_durable_output(None, &[], 0, true).unwrap(), 0);
+-        assert_eq!(reconcile_durable_output(Some(0), &[], 0, true).unwrap(), 0);
++        assert_eq!(
++            reconcile_durable_output(None, &[], 0, true, BootstrapRecovery::NotRequired).unwrap(),
++            0
++        );
++        assert_eq!(
++            reconcile_durable_output(Some(0), &[], 0, true, BootstrapRecovery::NotRequired)
++                .unwrap(),
++            0
++        );
+     }
+ 
+     #[test]

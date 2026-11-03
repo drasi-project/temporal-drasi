@@ -26,6 +26,21 @@ func (c *retryableClient) AddTasks(
 	return resp, err
 }
 
+func (c *retryableClient) BootstrapExecutionFeed(
+	ctx context.Context,
+	request *historyservice.BootstrapExecutionFeedRequest,
+	opts ...grpc.CallOption,
+) (*historyservice.BootstrapExecutionFeedResponse, error) {
+	var resp *historyservice.BootstrapExecutionFeedResponse
+	op := func(ctx context.Context) error {
+		var err error
+		resp, err = c.client.BootstrapExecutionFeed(ctx, request, opts...)
+		return err
+	}
+	err := backoff.ThrottleRetryContext(ctx, op, c.policy, c.isRetryable)
+	return resp, err
+}
+
 func (c *retryableClient) CancelNexusOperation(
 	ctx context.Context,
 	request *historyservice.CancelNexusOperationRequest,
@@ -290,6 +305,21 @@ func (c *retryableClient) GetDLQTasks(
 	op := func(ctx context.Context) error {
 		var err error
 		resp, err = c.client.GetDLQTasks(ctx, request, opts...)
+		return err
+	}
+	err := backoff.ThrottleRetryContext(ctx, op, c.policy, c.isRetryable)
+	return resp, err
+}
+
+func (c *retryableClient) GetExecutionFeed(
+	ctx context.Context,
+	request *historyservice.GetExecutionFeedRequest,
+	opts ...grpc.CallOption,
+) (*historyservice.GetExecutionFeedResponse, error) {
+	var resp *historyservice.GetExecutionFeedResponse
+	op := func(ctx context.Context) error {
+		var err error
+		resp, err = c.client.GetExecutionFeed(ctx, request, opts...)
 		return err
 	}
 	err := backoff.ThrottleRetryContext(ctx, op, c.policy, c.isRetryable)

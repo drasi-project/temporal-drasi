@@ -1,0 +1,920 @@
+syntax = "proto3";
+
+package drasi.watch.v1;
+
+import "google/api/annotations.proto";
+import "google/protobuf/descriptor.proto";
+import "google/protobuf/duration.proto";
+import "google/protobuf/empty.proto";
+import "google/protobuf/struct.proto";
+import "google/protobuf/timestamp.proto";
+import "temporal/api/common/v1/message.proto";
+import "temporal/api/enums/v1/workflow.proto";
+
+option go_package = "github.com/drasi-project/temporal-drasi/contracts/watch/v1;watchpb";
+
+// Access declares the backend authorization boundary, not a UI permission hint.
+enum Access {
+  ACCESS_UNSPECIFIED = 0;
+  ACCESS_NAMESPACE_READ = 1;
+  ACCESS_NAMESPACE_WRITE = 2;
+  ACCESS_CLUSTER_READ = 3;
+  ACCESS_CLUSTER_ADMIN = 4;
+}
+
+extend google.protobuf.MethodOptions {
+  // Access is checked by the serving backend before invoking a method.
+  Access access = 51001;
+}
+
+// WatchService manages namespace resources. Mutation responses describe durable
+// control-plane acceptance, not native readiness or successful workflow effects.
+service WatchService {
+  rpc GetCapabilities(GetCapabilitiesRequest) returns (Capabilities) {
+    option (access) = ACCESS_NAMESPACE_READ;
+    option (google.api.http) = {get: "/api/v1/namespaces/{namespace}/drasi/capabilities"};
+  }
+  rpc CreateSource(CreateSourceRequest) returns (Source) {
+    option (access) = ACCESS_NAMESPACE_WRITE;
+    option (google.api.http) = {post: "/api/v1/namespaces/{namespace}/drasi/sources" body: "*"};
+  }
+  rpc GetSource(GetSourceRequest) returns (Source) {
+    option (access) = ACCESS_NAMESPACE_READ;
+    option (google.api.http) = {get: "/api/v1/namespaces/{namespace}/drasi/sources/{id}"};
+  }
+  rpc ListSources(ListSourcesRequest) returns (ListSourcesResponse) {
+    option (access) = ACCESS_NAMESPACE_READ;
+    option (google.api.http) = {get: "/api/v1/namespaces/{namespace}/drasi/sources"};
+  }
+  rpc UpdateSource(UpdateSourceRequest) returns (Source) {
+    option (access) = ACCESS_NAMESPACE_WRITE;
+    option (google.api.http) = {put: "/api/v1/namespaces/{namespace}/drasi/sources/{id}" body: "*"};
+  }
+  rpc DeleteSource(SourceOperationRequest) returns (Source) {
+    option (access) = ACCESS_NAMESPACE_WRITE;
+    option (google.api.http) = {delete: "/api/v1/namespaces/{namespace}/drasi/sources/{id}"};
+  }
+  rpc StartSource(SourceOperationRequest) returns (Source) {
+    option (access) = ACCESS_NAMESPACE_WRITE;
+    option (google.api.http) = {post: "/api/v1/namespaces/{namespace}/drasi/sources/{id}/start" body: "*"};
+  }
+  rpc StopSource(SourceOperationRequest) returns (Source) {
+    option (access) = ACCESS_NAMESPACE_WRITE;
+    option (google.api.http) = {post: "/api/v1/namespaces/{namespace}/drasi/sources/{id}/stop" body: "*"};
+  }
+  rpc CreateQuery(CreateQueryRequest) returns (Query) {
+    option (access) = ACCESS_NAMESPACE_WRITE;
+    option (google.api.http) = {post: "/api/v1/namespaces/{namespace}/drasi/queries" body: "*"};
+  }
+  rpc GetQuery(GetQueryRequest) returns (Query) {
+    option (access) = ACCESS_NAMESPACE_READ;
+    option (google.api.http) = {get: "/api/v1/namespaces/{namespace}/drasi/queries/{id}"};
+  }
+  rpc ListQueries(ListQueriesRequest) returns (ListQueriesResponse) {
+    option (access) = ACCESS_NAMESPACE_READ;
+    option (google.api.http) = {get: "/api/v1/namespaces/{namespace}/drasi/queries"};
+  }
+  rpc UpdateQuery(UpdateQueryRequest) returns (Query) {
+    option (access) = ACCESS_NAMESPACE_WRITE;
+    option (google.api.http) = {put: "/api/v1/namespaces/{namespace}/drasi/queries/{id}" body: "*"};
+  }
+  rpc DeleteQuery(QueryOperationRequest) returns (Query) {
+    option (access) = ACCESS_NAMESPACE_WRITE;
+    option (google.api.http) = {delete: "/api/v1/namespaces/{namespace}/drasi/queries/{id}"};
+  }
+  rpc StartQuery(QueryOperationRequest) returns (Query) {
+    option (access) = ACCESS_NAMESPACE_WRITE;
+    option (google.api.http) = {post: "/api/v1/namespaces/{namespace}/drasi/queries/{id}/start" body: "*"};
+  }
+  rpc StopQuery(QueryOperationRequest) returns (Query) {
+    option (access) = ACCESS_NAMESPACE_WRITE;
+    option (google.api.http) = {post: "/api/v1/namespaces/{namespace}/drasi/queries/{id}/stop" body: "*"};
+  }
+  rpc ValidateQuery(ValidateQueryRequest) returns (ValidateQueryResponse) {
+    option (access) = ACCESS_NAMESPACE_READ;
+    option (google.api.http) = {post: "/api/v1/namespaces/{namespace}/drasi/queries/validate" body: "*"};
+  }
+  rpc PreviewQuery(PreviewQueryRequest) returns (PreviewQueryResponse) {
+    option (access) = ACCESS_NAMESPACE_READ;
+    option (google.api.http) = {post: "/api/v1/namespaces/{namespace}/drasi/queries/preview" body: "*"};
+  }
+  rpc CreateWatch(CreateWatchRequest) returns (Watch) {
+    option (access) = ACCESS_NAMESPACE_WRITE;
+    option (google.api.http) = {post: "/api/v1/namespaces/{namespace}/drasi/watches" body: "*"};
+  }
+  rpc GetWatch(GetWatchRequest) returns (Watch) {
+    option (access) = ACCESS_NAMESPACE_READ;
+    option (google.api.http) = {get: "/api/v1/namespaces/{namespace}/drasi/watches/{id}"};
+  }
+  rpc ListWatches(ListWatchesRequest) returns (ListWatchesResponse) {
+    option (access) = ACCESS_NAMESPACE_READ;
+    option (google.api.http) = {get: "/api/v1/namespaces/{namespace}/drasi/watches"};
+  }
+  rpc UpdateWatch(UpdateWatchRequest) returns (Watch) {
+    option (access) = ACCESS_NAMESPACE_WRITE;
+    option (google.api.http) = {put: "/api/v1/namespaces/{namespace}/drasi/watches/{id}" body: "*"};
+  }
+  rpc DeleteWatch(WatchOperationRequest) returns (Watch) {
+    option (access) = ACCESS_NAMESPACE_WRITE;
+    option (google.api.http) = {delete: "/api/v1/namespaces/{namespace}/drasi/watches/{id}"};
+  }
+  rpc PauseWatch(WatchOperationRequest) returns (Watch) {
+    option (access) = ACCESS_NAMESPACE_WRITE;
+    option (google.api.http) = {post: "/api/v1/namespaces/{namespace}/drasi/watches/{id}/pause" body: "*"};
+  }
+  rpc ResumeWatch(WatchOperationRequest) returns (Watch) {
+    option (access) = ACCESS_NAMESPACE_WRITE;
+    option (google.api.http) = {post: "/api/v1/namespaces/{namespace}/drasi/watches/{id}/resume" body: "*"};
+  }
+  rpc CancelWatch(WatchOperationRequest) returns (Watch) {
+    option (access) = ACCESS_NAMESPACE_WRITE;
+    option (google.api.http) = {post: "/api/v1/namespaces/{namespace}/drasi/watches/{id}/cancel" body: "*"};
+  }
+  rpc ResetWatch(ResetWatchRequest) returns (Watch) {
+    option (access) = ACCESS_NAMESPACE_WRITE;
+    option (google.api.http) = {post: "/api/v1/namespaces/{namespace}/drasi/watches/{id}/reset" body: "*"};
+  }
+  rpc ListDeliveries(ListDeliveriesRequest) returns (ListDeliveriesResponse) {
+    option (access) = ACCESS_NAMESPACE_READ;
+    option (google.api.http) = {get: "/api/v1/namespaces/{namespace}/drasi/watches/{id}/deliveries"};
+  }
+  rpc RetryDelivery(RetryDeliveryRequest) returns (Delivery) {
+    option (access) = ACCESS_NAMESPACE_WRITE;
+    option (google.api.http) = {post: "/api/v1/namespaces/{namespace}/drasi/watches/{id}/deliveries/{action_id}/retry" body: "*"};
+  }
+}
+
+// PluginService accepts only references from administrator-configured trusted
+// catalogs. Native binaries, registry URLs, credentials, and paths are not inputs.
+service PluginService {
+  rpc GetCapabilities(GetPluginCapabilitiesRequest) returns (PluginCapabilities) {
+    option (access) = ACCESS_CLUSTER_READ;
+    option (google.api.http) = {get: "/api/v1/drasi/plugins/capabilities"};
+  }
+  rpc ListCatalogs(ListCatalogsRequest) returns (ListCatalogsResponse) {
+    option (access) = ACCESS_CLUSTER_READ;
+    option (google.api.http) = {get: "/api/v1/drasi/plugins/catalogs"};
+  }
+  rpc ListPlugins(ListPluginsRequest) returns (ListPluginsResponse) {
+    option (access) = ACCESS_CLUSTER_READ;
+    option (google.api.http) = {get: "/api/v1/drasi/plugins"};
+  }
+  rpc GetPlugin(GetPluginRequest) returns (Plugin) {
+    option (access) = ACCESS_CLUSTER_READ;
+    option (google.api.http) = {get: "/api/v1/drasi/plugins/catalogs/{catalog_id}/plugins/{plugin_id}/versions/{version}"};
+  }
+  rpc InstallPlugin(InstallPluginRequest) returns (PluginInstallation) {
+    option (access) = ACCESS_CLUSTER_ADMIN;
+    option (google.api.http) = {post: "/api/v1/drasi/plugins/installations" body: "*"};
+  }
+  rpc ListInstallations(ListInstallationsRequest) returns (ListInstallationsResponse) {
+    option (access) = ACCESS_CLUSTER_READ;
+    option (google.api.http) = {get: "/api/v1/drasi/plugins/installations"};
+  }
+  rpc GetInstallation(GetInstallationRequest) returns (PluginInstallation) {
+    option (access) = ACCESS_CLUSTER_READ;
+    option (google.api.http) = {get: "/api/v1/drasi/plugins/installations/{digest}"};
+  }
+  rpc LoadPlugin(LoadPluginRequest) returns (PluginInstallation) {
+    option (access) = ACCESS_CLUSTER_ADMIN;
+    option (google.api.http) = {post: "/api/v1/drasi/plugins/installations/{digest}/load" body: "*"};
+  }
+}
+
+enum Trigger {
+  TRIGGER_UNSPECIFIED = 0;
+  TRIGGER_ENTER = 1;
+  TRIGGER_UPDATE = 2;
+  TRIGGER_LEAVE = 3;
+}
+
+// Ignore is the default for recurring watches. A one-shot ENTER condition
+// satisfies on an existing row after consistent bootstrap, regardless of Ignore.
+enum InitialResults {
+  INITIAL_RESULTS_IGNORE = 0;
+  INITIAL_RESULTS_INCLUDE = 1;
+}
+
+// DesiredState is accepted control-plane intent, not observed runtime health.
+enum DesiredState {
+  DESIRED_STATE_UNSPECIFIED = 0;
+  DESIRED_STATE_STOPPED = 1;
+  DESIRED_STATE_RUNNING = 2;
+  DESIRED_STATE_PAUSED = 3;
+  DESIRED_STATE_DELETED = 4;
+  DESIRED_STATE_CANCELED = 5;
+}
+
+enum LifecycleState {
+  LIFECYCLE_STATE_UNSPECIFIED = 0;
+  LIFECYCLE_STATE_STOPPED = 1;
+  LIFECYCLE_STATE_STARTING = 2;
+  LIFECYCLE_STATE_RUNNING = 3;
+  LIFECYCLE_STATE_PAUSED = 4;
+  LIFECYCLE_STATE_DELETING = 5;
+  LIFECYCLE_STATE_FAILED = 6;
+  LIFECYCLE_STATE_RECOVERY_REQUIRED = 7;
+  LIFECYCLE_STATE_COMPLETED = 8;
+  LIFECYCLE_STATE_CANCELED = 9;
+  LIFECYCLE_STATE_EXPIRED = 10;
+  LIFECYCLE_STATE_OWNER_CLOSED = 11;
+}
+
+// ResourceRef pins an immutable revision within the request namespace.
+message ResourceRef {
+  // Id identifies the namespace resource.
+  string id = 1;
+  // Revision is the nonzero immutable resource revision.
+  uint64 revision = 2;
+}
+
+message SecretReference {
+  // Provider identifies an administrator-configured secret provider.
+  string provider = 1;
+  // Key identifies the secret without containing its value.
+  string key = 2;
+  // Version identifies an immutable provider generation, never a moving alias.
+  string version = 3;
+}
+
+message PluginComponentRef {
+  // Digest is the immutable sha256 artifact digest.
+  string digest = 1;
+  // Component identifies a descriptor exported by that artifact.
+  string component = 2;
+}
+
+message ComponentConfiguration {
+  // Plugin identifies an installed, verified descriptor.
+  PluginComponentRef plugin = 1;
+  // Configuration contains non-secret values validated against the descriptor schema.
+  google.protobuf.Struct configuration = 2;
+  // Secrets maps schema secret fields to references, never secret values.
+  map<string, SecretReference> secrets = 3;
+}
+
+message SourceSpec {
+  oneof kind {
+    // Temporal exposes committed workflow, activity, and timer state without raw payloads.
+    google.protobuf.Empty temporal = 1;
+    // External selects an approved dynamically loaded source descriptor.
+    ComponentConfiguration external = 2;
+  }
+  // Bootstrap selects a separate bootstrap descriptor for an external source.
+  ComponentConfiguration bootstrap = 3;
+}
+
+message QuerySpec {
+  // Language is one of the runtime-advertised query languages.
+  string language = 1;
+  // Text is the query submitted to the native engine for validation.
+  string text = 2;
+  // Sources pins each referenced source revision within this namespace.
+  repeated ResourceRef sources = 3;
+  // StateStore identifies an administrator-configured persistent query backend.
+  string state_store = 4;
+}
+
+message Once {
+  // Owner pins completion and cancellation to a specific workflow run.
+  temporal.api.common.v1.WorkflowExecution owner = 1;
+  // Deadline is the absolute time after which the condition expires.
+  google.protobuf.Timestamp deadline = 2;
+}
+
+message WorkflowStart {
+  // WorkflowId is a literal ID or contains the single supported {action_id} token.
+  string workflow_id = 1;
+  // WorkflowType names the registered workflow type.
+  string workflow_type = 2;
+  // TaskQueue names the workflow task queue.
+  string task_queue = 3;
+  // Input preserves Temporal data-converter payloads and encoding metadata.
+  temporal.api.common.v1.Payloads input = 4;
+  // ExecutionTimeout bounds the complete workflow execution when specified.
+  google.protobuf.Duration execution_timeout = 5;
+  // RunTimeout bounds a workflow run when specified.
+  google.protobuf.Duration run_timeout = 6;
+  // TaskTimeout bounds a workflow task when specified.
+  google.protobuf.Duration task_timeout = 7;
+  // ReusePolicy controls closed workflow ID reuse and must not terminate a running workflow.
+  temporal.api.enums.v1.WorkflowIdReusePolicy reuse_policy = 8;
+  // ConflictPolicy controls running execution conflicts without terminating an existing workflow.
+  temporal.api.enums.v1.WorkflowIdConflictPolicy conflict_policy = 9;
+}
+
+message WorkflowSignal {
+  oneof target {
+    // Run pins delivery to this exact execution and never retargets a successor.
+    temporal.api.common.v1.WorkflowExecution run = 1;
+    // CurrentWorkflowId selects the current run once and freezes it in the intent before dispatch.
+    string current_workflow_id = 2;
+  }
+  // SignalName names the workflow signal handler.
+  string signal_name = 3;
+  // Input preserves Temporal data-converter payloads and encoding metadata.
+  temporal.api.common.v1.Payloads input = 4;
+}
+
+message WorkflowSignalWithStart {
+  // Start supplies the workflow start attributes.
+  WorkflowStart start = 1;
+  // SignalName names the workflow signal handler.
+  string signal_name = 2;
+  // SignalInput preserves Temporal data-converter payloads and encoding metadata.
+  temporal.api.common.v1.Payloads signal_input = 3;
+}
+
+enum ResultPayload {
+  // Append adds a json/plain ResultChange payload after the configured input.
+  RESULT_PAYLOAD_APPEND = 0;
+  // Omit sends only the configured input.
+  RESULT_PAYLOAD_OMIT = 1;
+}
+
+message WorkflowAction {
+  oneof operation {
+    // Start starts a workflow through the standard Temporal frontend.
+    WorkflowStart start = 1;
+    // Signal sends a signal through the standard Temporal frontend.
+    WorkflowSignal signal = 2;
+    // SignalWithStart atomically signals or starts through the standard frontend.
+    WorkflowSignalWithStart signal_with_start = 3;
+  }
+  // ResultPayload determines whether the result envelope is appended to the input.
+  ResultPayload result_payload = 4;
+}
+
+message WatchSpec {
+  // Query pins the query revision whose output is consumed.
+  ResourceRef query = 1;
+  // Trigger selects result-set entry, update, or exit rather than source operations.
+  Trigger trigger = 2;
+  // InitialResults defaults to ignoring existing rows for recurring watches.
+  InitialResults initial_results = 3;
+  oneof lifetime {
+    // Persistent keeps accepting changes until paused or deleted.
+    google.protobuf.Empty persistent = 4;
+    // Once satisfies once and signals only the owning workflow run.
+    Once once = 5;
+  }
+  // Action is frozen in each accepted delivery intent.
+  WorkflowAction action = 6;
+}
+
+message OutputIdentity {
+  // QueryRevision identifies the immutable query revision.
+  uint64 query_revision = 1;
+  // Incarnation changes only on an explicit destructive reset.
+  string incarnation = 2;
+  // Sequence is the durable query output sequence within the incarnation.
+  uint64 sequence = 3;
+  // RowIdentity identifies a row in the result set.
+  string row_identity = 4;
+  // DiffOrdinal distinguishes changes within one output sequence.
+  uint32 diff_ordinal = 5;
+}
+
+message ResultChange {
+  // ActionId is stable across owner replacement and workflow RPC retries.
+  string action_id = 1;
+  // Output identifies the source query result change.
+  OutputIdentity output = 2;
+  // Trigger distinguishes result entry, update, and exit.
+  Trigger trigger = 3;
+  // Before contains the previous row for update and leave changes.
+  google.protobuf.Struct before = 4;
+  // After contains the current row for enter and update changes.
+  google.protobuf.Struct after = 5;
+}
+
+message ResourceStatus {
+  // State describes observed runtime state rather than a mutation success flag.
+  LifecycleState state = 1;
+  // ObservedRevision is the resource revision reconciled by the runtime.
+  uint64 observed_revision = 2;
+  // Message is a redacted diagnostic, including replay gaps requiring intervention.
+  string message = 3;
+  // UpdatedAt is the time of this status observation.
+  google.protobuf.Timestamp updated_at = 4;
+  // AcceptedOutput is the last durably accepted output for this watch only.
+  OutputIdentity accepted_output = 5;
+  // PendingDeliveries counts accepted actions whose outcomes are not final.
+  uint64 pending_deliveries = 6;
+}
+
+message Source {
+  // Namespace scopes the source and its configuration.
+  string namespace = 1;
+  // Id identifies the source within the namespace.
+  string id = 2;
+  // Revision changes on each accepted definition or lifecycle mutation.
+  uint64 revision = 3;
+  // Spec contains only non-secret configuration and secret references.
+  SourceSpec spec = 4;
+  // Status reports the last observed reconciliation state.
+  ResourceStatus status = 5;
+  // DesiredState is the durably accepted lifecycle intent for this revision.
+  DesiredState desired_state = 6;
+}
+
+message Query {
+  // Namespace scopes the query and all source references.
+  string namespace = 1;
+  // Id identifies the query within the namespace.
+  string id = 2;
+  // Revision changes on each accepted definition or lifecycle mutation.
+  uint64 revision = 3;
+  // Spec defines the pinned query and persistent backend.
+  QuerySpec spec = 4;
+  // Status reports observed readiness or an explicit recovery requirement.
+  ResourceStatus status = 5;
+  // DesiredState is the durably accepted lifecycle intent for this revision.
+  DesiredState desired_state = 6;
+}
+
+message Watch {
+  // Namespace scopes the watch and all action targets.
+  string namespace = 1;
+  // Id identifies the watch within the namespace.
+  string id = 2;
+  // Revision fences stale acceptance after edits and lifecycle mutations.
+  uint64 revision = 3;
+  // Spec defines the trigger, lifetime, and immutable action template.
+  WatchSpec spec = 4;
+  // Status reports accepted progress separately from workflow action outcomes.
+  ResourceStatus status = 5;
+  // DesiredState is the durably accepted lifecycle intent for this revision.
+  DesiredState desired_state = 6;
+}
+
+enum DeliveryState {
+  DELIVERY_STATE_UNSPECIFIED = 0;
+  DELIVERY_STATE_PENDING = 1;
+  DELIVERY_STATE_RETRYING = 2;
+  DELIVERY_STATE_DELIVERED = 3;
+  DELIVERY_STATE_BLOCKED = 4;
+  DELIVERY_STATE_AMBIGUOUS = 5;
+}
+
+message Delivery {
+  // ActionId is the durable request identity reused for every retry.
+  string action_id = 1;
+  // Watch identifies the revision that accepted the immutable action.
+  ResourceRef watch = 2;
+  // Output identifies the accepted result change.
+  OutputIdentity output = 3;
+  // State distinguishes recorded success, retry, failure, and uncertain outcomes.
+  DeliveryState state = 4;
+  // Attempts counts dispatched workflow RPC attempts.
+  uint32 attempts = 5;
+  // Execution identifies the actual workflow target when known.
+  temporal.api.common.v1.WorkflowExecution execution = 6;
+  // Message contains a redacted delivery diagnostic.
+  string message = 7;
+  // UpdatedAt is the time of the last recorded outcome.
+  google.protobuf.Timestamp updated_at = 8;
+  // NextAttemptAt is set only when a retry is scheduled.
+  google.protobuf.Timestamp next_attempt_at = 9;
+}
+
+message Capabilities {
+  // Enabled is true only when the serving cluster supports this feature.
+  bool enabled = 1;
+  // ApiVersion is the supported contract version.
+  string api_version = 2;
+  // QueryLanguages lists engine-advertised supported languages.
+  repeated string query_languages = 3;
+  // TemporalSource indicates committed workflow, activity, and timer feed support.
+  bool temporal_source = 4;
+  // ExternalSources indicates verified native source support.
+  bool external_sources = 5;
+  // Once indicates workflow-owned one-shot support.
+  bool once = 6;
+  // CrossHostRecovery is true only for verified portable checkpoint restore.
+  bool cross_host_recovery = 7;
+  // GlobalNamespaces is true only for supported active/passive recovery.
+  bool global_namespaces = 8;
+  // MaxPreviewRows is the enforced upper bound on preview rows.
+  uint32 max_preview_rows = 9;
+  // MaxRequestBytes is the enforced serialized request size bound.
+  uint32 max_request_bytes = 10;
+  // StateStores lists approved persistent query backends.
+  repeated string state_stores = 11;
+  // AllowedMethods lists fully qualified RPC methods the caller may invoke.
+  repeated string allowed_methods = 12;
+  // Message describes disabled or unsupported combinations without claiming readiness.
+  string message = 13;
+}
+
+message GetCapabilitiesRequest {
+  // Namespace selects the authorization and capability scope.
+  string namespace = 1;
+}
+message CreateSourceRequest {
+  // Namespace scopes the new source.
+  string namespace = 1;
+  // Id is the caller-selected stable source identity.
+  string id = 2;
+  // Spec defines the source.
+  SourceSpec spec = 3;
+  // RequestId deduplicates retries of this mutation.
+  string request_id = 4;
+}
+message GetSourceRequest {
+  // Namespace scopes the lookup.
+  string namespace = 1;
+  // Id identifies the source.
+  string id = 2;
+}
+message ListSourcesRequest {
+  // Namespace scopes the listing.
+  string namespace = 1;
+  // PageSize defaults to 50 and may not exceed 200.
+  int32 page_size = 2;
+  // PageToken is an opaque continuation token.
+  string page_token = 3;
+}
+message ListSourcesResponse {
+  // Sources contains the requested page.
+  repeated Source sources = 1;
+  // NextPageToken is empty when there are no more results.
+  string next_page_token = 2;
+}
+message UpdateSourceRequest {
+  // Namespace scopes the update.
+  string namespace = 1;
+  // Id identifies the source.
+  string id = 2;
+  // ExpectedRevision rejects edits based on stale state.
+  uint64 expected_revision = 3;
+  // Spec fully replaces the source definition.
+  SourceSpec spec = 4;
+  // RequestId deduplicates retries of this mutation.
+  string request_id = 5;
+}
+message SourceOperationRequest {
+  // Namespace scopes the operation.
+  string namespace = 1;
+  // Id identifies the source.
+  string id = 2;
+  // ExpectedRevision rejects stale lifecycle commands.
+  uint64 expected_revision = 3;
+  // RequestId deduplicates retries of this mutation.
+  string request_id = 4;
+}
+message CreateQueryRequest {
+  // Namespace scopes the new query.
+  string namespace = 1;
+  // Id is the caller-selected stable query identity.
+  string id = 2;
+  // Spec defines the query.
+  QuerySpec spec = 3;
+  // RequestId deduplicates retries of this mutation.
+  string request_id = 4;
+}
+message GetQueryRequest {
+  // Namespace scopes the lookup.
+  string namespace = 1;
+  // Id identifies the query.
+  string id = 2;
+}
+message ListQueriesRequest {
+  // Namespace scopes the listing.
+  string namespace = 1;
+  // PageSize defaults to 50 and may not exceed 200.
+  int32 page_size = 2;
+  // PageToken is an opaque continuation token.
+  string page_token = 3;
+}
+message ListQueriesResponse {
+  // Queries contains the requested page.
+  repeated Query queries = 1;
+  // NextPageToken is empty when there are no more results.
+  string next_page_token = 2;
+}
+message UpdateQueryRequest {
+  // Namespace scopes the update.
+  string namespace = 1;
+  // Id identifies the query.
+  string id = 2;
+  // ExpectedRevision rejects edits based on stale state.
+  uint64 expected_revision = 3;
+  // Spec fully replaces the query definition.
+  QuerySpec spec = 4;
+  // RequestId deduplicates retries of this mutation.
+  string request_id = 5;
+}
+message QueryOperationRequest {
+  // Namespace scopes the operation.
+  string namespace = 1;
+  // Id identifies the query.
+  string id = 2;
+  // ExpectedRevision rejects stale lifecycle commands.
+  uint64 expected_revision = 3;
+  // RequestId deduplicates retries of this mutation.
+  string request_id = 4;
+}
+message ValidateQueryRequest {
+  // Namespace scopes schema and language validation.
+  string namespace = 1;
+  // Spec is validated without creating or changing a resource.
+  QuerySpec spec = 2;
+}
+message Diagnostic {
+  // Field is the request field path associated with the diagnostic.
+  string field = 1;
+  // Message describes the validation failure without secret values.
+  string message = 2;
+}
+message ValidateQueryResponse {
+  // Valid indicates native language and referenced-schema validation passed.
+  bool valid = 1;
+  // Diagnostics explains validation failures.
+  repeated Diagnostic diagnostics = 2;
+}
+message PreviewQueryRequest {
+  // Namespace scopes source access.
+  string namespace = 1;
+  // Spec is evaluated without registering a watch or accepting actions.
+  QuerySpec spec = 2;
+  // Limit must be between 1 and 200 and within the advertised capability limit.
+  uint32 limit = 3;
+}
+message PreviewQueryResponse {
+  // Rows contains bounded current results and never delivery success claims.
+  repeated google.protobuf.Struct rows = 1;
+  // Truncated is true when the preview omitted additional rows.
+  bool truncated = 2;
+  // ObservedAt is the observation time, not an atomic cross-source snapshot time.
+  google.protobuf.Timestamp observed_at = 3;
+}
+message CreateWatchRequest {
+  // Namespace scopes the new watch.
+  string namespace = 1;
+  // Id is stable across registration retries, including one-shot registration.
+  string id = 2;
+  // Spec defines the watch.
+  WatchSpec spec = 3;
+  // RequestId deduplicates retries of this mutation.
+  string request_id = 4;
+}
+message GetWatchRequest {
+  // Namespace scopes the lookup.
+  string namespace = 1;
+  // Id identifies the watch.
+  string id = 2;
+}
+message ListWatchesRequest {
+  // Namespace scopes the listing.
+  string namespace = 1;
+  // PageSize defaults to 50 and may not exceed 200.
+  int32 page_size = 2;
+  // PageToken is an opaque continuation token.
+  string page_token = 3;
+  // Owner optionally filters one-shot conditions by exact workflow execution.
+  temporal.api.common.v1.WorkflowExecution owner = 4;
+}
+message ListWatchesResponse {
+  // Watches contains the requested page.
+  repeated Watch watches = 1;
+  // NextPageToken is empty when there are no more results.
+  string next_page_token = 2;
+}
+message UpdateWatchRequest {
+  // Namespace scopes the update.
+  string namespace = 1;
+  // Id identifies the watch.
+  string id = 2;
+  // ExpectedRevision rejects edits based on stale state.
+  uint64 expected_revision = 3;
+  // Spec fully replaces the watch definition without rewriting accepted intents.
+  WatchSpec spec = 4;
+  // RequestId deduplicates retries of this mutation.
+  string request_id = 5;
+}
+message WatchOperationRequest {
+  // Namespace scopes the operation.
+  string namespace = 1;
+  // Id identifies the watch.
+  string id = 2;
+  // ExpectedRevision rejects stale lifecycle commands.
+  uint64 expected_revision = 3;
+  // RequestId deduplicates retries of this mutation.
+  string request_id = 4;
+}
+message ResetWatchRequest {
+  // Namespace scopes the reset.
+  string namespace = 1;
+  // Id identifies the watch.
+  string id = 2;
+  // ExpectedRevision rejects stale reset commands.
+  uint64 expected_revision = 3;
+  // RequestId deduplicates retries of this mutation.
+  string request_id = 4;
+  // InitialResults explicitly selects bootstrap behavior for the new incarnation.
+  InitialResults initial_results = 5;
+}
+message ListDeliveriesRequest {
+  // Namespace scopes the listing.
+  string namespace = 1;
+  // Id identifies the watch.
+  string id = 2;
+  // PageSize defaults to 50 and may not exceed 200.
+  int32 page_size = 3;
+  // PageToken is an opaque continuation token.
+  string page_token = 4;
+}
+message ListDeliveriesResponse {
+  // Deliveries contains a bounded page of accepted intents and recorded outcomes.
+  repeated Delivery deliveries = 1;
+  // NextPageToken is empty when there are no more results.
+  string next_page_token = 2;
+}
+message RetryDeliveryRequest {
+  // Namespace scopes the retry.
+  string namespace = 1;
+  // Id identifies the watch.
+  string id = 2;
+  // ActionId identifies the original immutable intent.
+  string action_id = 3;
+  // ExpectedRevision rejects stale commands without changing the original intent.
+  uint64 expected_revision = 4;
+  // RequestId deduplicates retries of this command.
+  string request_id = 5;
+  // AcknowledgeAmbiguous explicitly accepts duplicate-effect risk for uncertain outcomes.
+  bool acknowledge_ambiguous = 6;
+}
+
+enum PluginCategory {
+  PLUGIN_CATEGORY_UNSPECIFIED = 0;
+  PLUGIN_CATEGORY_SOURCE = 1;
+  PLUGIN_CATEGORY_BOOTSTRAP = 2;
+  PLUGIN_CATEGORY_REACTION = 3;
+  PLUGIN_CATEGORY_IDENTITY = 4;
+  PLUGIN_CATEGORY_SECRET_STORE = 5;
+}
+enum PluginHostState {
+  PLUGIN_HOST_STATE_UNSPECIFIED = 0;
+  PLUGIN_HOST_STATE_AVAILABLE = 1;
+  PLUGIN_HOST_STATE_DOWNLOADING = 2;
+  PLUGIN_HOST_STATE_VERIFIED = 3;
+  PLUGIN_HOST_STATE_INSTALLED = 4;
+  PLUGIN_HOST_STATE_LOADED = 5;
+  PLUGIN_HOST_STATE_INCOMPATIBLE = 6;
+  PLUGIN_HOST_STATE_FAILED = 7;
+  PLUGIN_HOST_STATE_RESTART_REQUIRED = 8;
+}
+
+// GetPluginCapabilitiesRequest discovers cluster capabilities without a namespace.
+message GetPluginCapabilitiesRequest {}
+
+// PluginCapabilities reports availability and caller-specific permissions without
+// attempting installation or loading native code.
+message PluginCapabilities {
+  // Enabled is true only when the serving cluster supports plugin management.
+  bool enabled = 1;
+  // ApiVersion is the supported plugin contract version.
+  string api_version = 2;
+  // AllowedMethods lists fully qualified PluginService RPC methods the caller may invoke.
+  repeated string allowed_methods = 3;
+  // MaxRequestBytes is the enforced serialized request size bound.
+  uint32 max_request_bytes = 4;
+  // Message describes disabled or unsupported behavior without claiming verified loading.
+  string message = 5;
+}
+
+message Catalog {
+  // Id identifies an administrator-configured trusted catalog.
+  string id = 1;
+  // DisplayName is the human-readable catalog name.
+  string display_name = 2;
+}
+message PluginDescriptor {
+  // Component identifies the component within the plugin artifact.
+  string component = 1;
+  // Category is the component category advertised by the host SDK.
+  PluginCategory category = 2;
+  // ConfigurationSchema is bounded untrusted JSON Schema with optional x-ui hints.
+  google.protobuf.Struct configuration_schema = 3;
+  // Supported is true only if this runtime can instantiate the component.
+  bool supported = 4;
+}
+message Plugin {
+  // CatalogId identifies the configured catalog, never a caller-provided URL.
+  string catalog_id = 1;
+  // Id identifies the plugin in the catalog.
+  string id = 2;
+  // Version is the catalog release version.
+  string version = 3;
+  // Digest pins the immutable artifact.
+  string digest = 4;
+  // SignerIdentity is advertised provenance, not proof of verification.
+  string signer_identity = 5;
+  // Provenance is redacted human-readable build provenance.
+  string provenance = 6;
+  // Platform names the native OS and architecture.
+  string platform = 7;
+  // AbiVersion declares the required plugin ABI.
+  string abi_version = 8;
+  // SdkVersion declares the required host SDK version.
+  string sdk_version = 9;
+  // CoreVersion declares the required Drasi core version.
+  string core_version = 10;
+  // Descriptors contains bounded component schemas and metadata.
+  repeated PluginDescriptor descriptors = 11;
+  // Compatible reflects host compatibility checks, not cryptographic verification.
+  bool compatible = 12;
+  // Message explains incompatibility or discovery failure without credentials.
+  string message = 13;
+}
+message PluginHostStatus {
+  // HostId identifies the applicable Watch host.
+  string host_id = 1;
+  // State reports this host's actual installation or load progress.
+  PluginHostState state = 2;
+  // Message is a redacted verification or loading diagnostic.
+  string message = 3;
+  // UpdatedAt is the time of this host observation.
+  google.protobuf.Timestamp updated_at = 4;
+  // VerifiedSignerIdentity is populated only after signature and trust verification.
+  string verified_signer_identity = 5;
+}
+message PluginInstallation {
+  // Plugin is the immutable catalog artifact selected for installation.
+  Plugin plugin = 1;
+  // LoadRequested records desired loading, not observed success.
+  bool load_requested = 2;
+  // Hosts reports each applicable host separately without aggregate false success.
+  repeated PluginHostStatus hosts = 3;
+}
+message ListCatalogsRequest {
+  // PageSize defaults to 50 and may not exceed 200.
+  int32 page_size = 1;
+  // PageToken is an opaque continuation token.
+  string page_token = 2;
+}
+message ListCatalogsResponse {
+  // Catalogs contains a bounded page of configured catalogs.
+  repeated Catalog catalogs = 1;
+  // NextPageToken is empty when there are no more results.
+  string next_page_token = 2;
+}
+message ListPluginsRequest {
+  // CatalogId optionally restricts discovery to a configured catalog.
+  string catalog_id = 1;
+  // Search filters catalog metadata rather than providing a registry location.
+  string search = 2;
+  // PageSize defaults to 50 and may not exceed 200.
+  int32 page_size = 3;
+  // PageToken is an opaque continuation token.
+  string page_token = 4;
+}
+message ListPluginsResponse {
+  // Plugins contains a bounded page of discovered plugin versions.
+  repeated Plugin plugins = 1;
+  // NextPageToken is empty when there are no more results.
+  string next_page_token = 2;
+}
+message GetPluginRequest {
+  // CatalogId identifies a configured trusted catalog.
+  string catalog_id = 1;
+  // PluginId identifies the plugin within the catalog.
+  string plugin_id = 2;
+  // Version selects the release to inspect.
+  string version = 3;
+}
+message InstallPluginRequest {
+  // CatalogId identifies a configured trusted catalog.
+  string catalog_id = 1;
+  // PluginId identifies the plugin within the catalog.
+  string plugin_id = 2;
+  // Version identifies the inspected catalog release.
+  string version = 3;
+  // Digest must match the immutable digest advertised for that release.
+  string digest = 4;
+  // RequestId deduplicates retries of this installation request.
+  string request_id = 5;
+}
+message ListInstallationsRequest {
+  // PageSize defaults to 50 and may not exceed 200.
+  int32 page_size = 1;
+  // PageToken is an opaque continuation token.
+  string page_token = 2;
+}
+message ListInstallationsResponse {
+  // Installations contains a bounded page of desired installations and host states.
+  repeated PluginInstallation installations = 1;
+  // NextPageToken is empty when there are no more results.
+  string next_page_token = 2;
+}
+message GetInstallationRequest {
+  // Digest identifies the immutable installed artifact.
+  string digest = 1;
+}
+message LoadPluginRequest {
+  // Digest identifies an installed artifact that must be verified before initialization.
+  string digest = 1;
+  // RequestId deduplicates retries of the desired load request.
+  string request_id = 2;
+}

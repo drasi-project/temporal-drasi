@@ -15,6 +15,7 @@ import (
 	enumsspb "go.temporal.io/server/api/enums/v1"
 	persistencespb "go.temporal.io/server/api/persistence/v1"
 	"go.temporal.io/server/chasm"
+	"go.temporal.io/server/common/definition"
 	"go.temporal.io/server/common/namespace"
 	"go.temporal.io/server/common/persistence/serialization"
 	"go.temporal.io/server/service/history/tasks"
@@ -341,12 +342,15 @@ type (
 		ShardID   int32
 		PageSize  int
 		PageToken []byte
+		// KeysOnly enumerates primary keys without reading mutable-state sub-tables.
+		KeysOnly bool
 	}
 
 	// ListConcreteExecutionsResponse is response to ListConcreteExecutions
 	ListConcreteExecutionsResponse struct {
 		States    []*persistencespb.WorkflowMutableState
 		PageToken []byte
+		Keys      []definition.WorkflowKey
 	}
 
 	// WorkflowEvents is used as generic workflow history events transaction container
@@ -364,6 +368,8 @@ type (
 	WorkflowMutation struct {
 		ExecutionInfo  *persistencespb.WorkflowExecutionInfo
 		ExecutionState *persistencespb.WorkflowExecutionState
+		// ExecutionFeedCaptureEpoch is checked by the shard before primary persistence.
+		ExecutionFeedCaptureEpoch int64
 		// TODO deprecate NextEventID in favor of DBRecordVersion
 		NextEventID int64
 
@@ -397,6 +403,8 @@ type (
 	WorkflowSnapshot struct {
 		ExecutionInfo  *persistencespb.WorkflowExecutionInfo
 		ExecutionState *persistencespb.WorkflowExecutionState
+		// ExecutionFeedCaptureEpoch is checked by the shard before primary persistence.
+		ExecutionFeedCaptureEpoch int64
 		// TODO deprecate NextEventID in favor of DBRecordVersion
 		NextEventID int64
 
@@ -423,6 +431,12 @@ type (
 		WorkflowID  string
 		RunID       string
 		ArchetypeID chasm.ArchetypeID
+		// ExecutionFeedTask is committed atomically with deletion when capture is enabled.
+		ExecutionFeedTask *tasks.ExecutionFeedTask
+		// ExecutionFeedTaskBlob is populated by the execution manager.
+		ExecutionFeedTaskBlob *commonpb.DataBlob
+		// A nonzero RangeID fences deletion against a replaced shard owner.
+		RangeID int64
 	}
 
 	// DeleteCurrentWorkflowExecutionRequest is used to delete the current workflow execution
@@ -1480,4 +1494,5 @@ const (
 	Matching
 	Worker
 	InternalFrontend
+	Watch
 )

@@ -10,6 +10,7 @@ const (
 	HistoryService          ServiceName = "history"
 	MatchingService         ServiceName = "matching"
 	WorkerService           ServiceName = "worker"
+	WatchService            ServiceName = "watch"
 	ServerService           ServiceName = "server"
 	UnitTestService         ServiceName = "unittest"
 )

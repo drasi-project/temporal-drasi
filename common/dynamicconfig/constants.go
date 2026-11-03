@@ -3393,6 +3393,34 @@ Requires service restart to take effect.`,
 		`SendRawHistoryBytesToMatchingService controls whether to use the new raw_history_bytes field (21) instead of raw_history field (20) when sending history to matching service. Only enable after all services are upgraded. NOTE: This flag only has effect when SendRawHistoryBetweenInternalServices is also enabled.`,
 	)
 
+	EnableDrasiWatches = NewNamespaceBoolSetting(
+		"drasi.enabled",
+		false,
+		`Enable namespace Watch control. Native runtime availability and source readiness are checked separately.
+Global namespaces are not supported.`,
+	)
+	WatchPersistenceMaxQPS = NewGlobalIntSetting(
+		"watch.persistenceMaxQPS",
+		100,
+		`Maximum persistence QPS for each opt-in Watch host's namespace cache.`,
+	)
+	WatchThrottledLogRPS = NewGlobalIntSetting(
+		"watch.throttledLogRPS",
+		20,
+		`Maximum throttled log messages per second for each opt-in Watch host.`,
+	)
+	EnableExecutionFeedQueue = NewGlobalBoolSetting(
+		"history.enableExecutionFeedQueue",
+		false,
+		`Register the committed execution-feed ingestion queue. Restart all services after changing this setting.
+Enable capture only after every relevant History writer supports it. The retained journal is not a task queue.`,
+	)
+	EnableExecutionFeed = NewNamespaceBoolSetting(
+		"history.enableExecutionFeed",
+		false,
+		`Capture committed workflow and activity state for a namespace. Requires the execution-feed queue at startup.
+Capture interruption requires a new source bootstrap incarnation. Global namespaces are not supported.`,
+	)
 	EnableChasm = NewNamespaceBoolSetting(
 		"history.enableChasm",
 		true,

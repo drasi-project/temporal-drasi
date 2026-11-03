@@ -1,0 +1,38 @@
+{
+  "name": "@drasi-project/temporal-watch-contracts",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Versioned Temporal Drasi API contracts.",
+  "files": [
+    "Makefile",
+    "README.md",
+    "buf*.yaml",
+    "go.mod",
+    "go.sum",
+    "proto-dependencies.lock.json",
+    "tsconfig.json",
+    "internal/generate/*.go",
+    "openapi/*.json",
+    "proto/**/*.proto",
+    "scripts/*.py",
+    "scripts/*.sh",
+    "scripts/*.cjs",
+    "typescript/**/*.ts",
+    "v1/*.go",
+    "validation/*.go"
+  ],
+  "exports": {
+    "./v1": "./typescript/drasi/watch/v1/service.ts"
+  },
+  "scripts": {
+    "generate": "bash scripts/generate.sh",
+    "check:generated": "bash scripts/generate.sh --check",
+    "check": "tsc --noEmit",
+    "test": "tsc --outDir .tools/ts-test --noEmit false --module CommonJS --moduleResolution Node && node scripts/test-json.cjs"
+  },
+  "devDependencies": {
+    "@bufbuild/buf": "1.50.0",
+    "ts-proto": "2.18.0",
+    "typescript": "5.8.3"
+  }
+}

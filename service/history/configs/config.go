@@ -11,7 +11,9 @@ import (
 
 // Config represents configuration for history service
 type Config struct {
-	NumberOfShards int32
+	// ExecutionFeedEnabled requires capture on every writer before source activation.
+	ExecutionFeedEnabled dynamicconfig.BoolPropertyFnWithNamespaceFilter
+	NumberOfShards       int32
 
 	EnableReplicationStream                       dynamicconfig.BoolPropertyFn
 	EmitReplicationLifecycleEvents                dynamicconfig.BoolPropertyFn

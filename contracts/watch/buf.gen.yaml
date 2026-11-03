@@ -1,0 +1,40 @@
+version: v2
+plugins:
+  - local: .tools/bin/protoc-gen-go
+    out: .
+    opt:
+      - module=github.com/drasi-project/temporal-drasi/contracts/watch
+  - local: .tools/bin/protoc-gen-go-grpc
+    out: .
+    opt:
+      - module=github.com/drasi-project/temporal-drasi/contracts/watch
+  - local: .tools/bin/protoc-gen-grpc-gateway
+    out: .
+    opt:
+      - module=github.com/drasi-project/temporal-drasi/contracts/watch
+  - local: .tools/bin/protoc-gen-openapiv2
+    out: openapi
+    opt:
+      - allow_merge=true
+      - merge_file_name=watch
+      - disable_default_errors=false
+  - local: node_modules/.bin/protoc-gen-ts_proto
+    out: typescript
+    include_imports: true
+    opt:
+      - outputEncodeMethods=false
+      - outputJsonMethods=true
+      - outputServices=false
+      - outputClientImpl=false
+      - env=browser
+      - forceLong=string
+      - useDate=string
+      - oneof=unions-value
+      - useJsonName=true
+      - stringEnums=true
+      - useOptionals=all
+      - esModuleInterop=true
+inputs:
+  - directory: .
+    paths:
+      - proto/drasi/watch/v1/service.proto

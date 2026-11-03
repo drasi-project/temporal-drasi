@@ -63,6 +63,26 @@ func (mr *MockHistoryServiceClientMockRecorder) AddTasks(ctx, in any, opts ...an
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "AddTasks", reflect.TypeOf((*MockHistoryServiceClient)(nil).AddTasks), varargs...)
 }
 
+// BootstrapExecutionFeed mocks base method.
+func (m *MockHistoryServiceClient) BootstrapExecutionFeed(ctx context.Context, in *historyservice.BootstrapExecutionFeedRequest, opts ...grpc.CallOption) (*historyservice.BootstrapExecutionFeedResponse, error) {
+	m.ctrl.T.Helper()
+	varargs := []any{ctx, in}
+	for _, a := range opts {
+		varargs = append(varargs, a)
+	}
+	ret := m.ctrl.Call(m, "BootstrapExecutionFeed", varargs...)
+	ret0, _ := ret[0].(*historyservice.BootstrapExecutionFeedResponse)
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
+}
+
+// BootstrapExecutionFeed indicates an expected call of BootstrapExecutionFeed.
+func (mr *MockHistoryServiceClientMockRecorder) BootstrapExecutionFeed(ctx, in any, opts ...any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	varargs := append([]any{ctx, in}, opts...)
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "BootstrapExecutionFeed", reflect.TypeOf((*MockHistoryServiceClient)(nil).BootstrapExecutionFeed), varargs...)
+}
+
 // CancelNexusOperation mocks base method.
 func (m *MockHistoryServiceClient) CancelNexusOperation(ctx context.Context, in *historyservice.CancelNexusOperationRequest, opts ...grpc.CallOption) (*historyservice.CancelNexusOperationResponse, error) {
 	m.ctrl.T.Helper()
@@ -421,6 +441,26 @@ func (mr *MockHistoryServiceClientMockRecorder) GetDLQTasks(ctx, in any, opts ..
 	mr.mock.ctrl.T.Helper()
 	varargs := append([]any{ctx, in}, opts...)
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "GetDLQTasks", reflect.TypeOf((*MockHistoryServiceClient)(nil).GetDLQTasks), varargs...)
+}
+
+// GetExecutionFeed mocks base method.
+func (m *MockHistoryServiceClient) GetExecutionFeed(ctx context.Context, in *historyservice.GetExecutionFeedRequest, opts ...grpc.CallOption) (*historyservice.GetExecutionFeedResponse, error) {
+	m.ctrl.T.Helper()
+	varargs := []any{ctx, in}
+	for _, a := range opts {
+		varargs = append(varargs, a)
+	}
+	ret := m.ctrl.Call(m, "GetExecutionFeed", varargs...)
+	ret0, _ := ret[0].(*historyservice.GetExecutionFeedResponse)
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
+}
+
+// GetExecutionFeed indicates an expected call of GetExecutionFeed.
+func (mr *MockHistoryServiceClientMockRecorder) GetExecutionFeed(ctx, in any, opts ...any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	varargs := append([]any{ctx, in}, opts...)
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "GetExecutionFeed", reflect.TypeOf((*MockHistoryServiceClient)(nil).GetExecutionFeed), varargs...)
 }
 
 // GetMutableState mocks base method.
@@ -1780,6 +1820,21 @@ func (mr *MockHistoryServiceServerMockRecorder) AddTasks(arg0, arg1 any) *gomock
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "AddTasks", reflect.TypeOf((*MockHistoryServiceServer)(nil).AddTasks), arg0, arg1)
 }
 
+// BootstrapExecutionFeed mocks base method.
+func (m *MockHistoryServiceServer) BootstrapExecutionFeed(arg0 context.Context, arg1 *historyservice.BootstrapExecutionFeedRequest) (*historyservice.BootstrapExecutionFeedResponse, error) {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "BootstrapExecutionFeed", arg0, arg1)
+	ret0, _ := ret[0].(*historyservice.BootstrapExecutionFeedResponse)
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
+}
+
+// BootstrapExecutionFeed indicates an expected call of BootstrapExecutionFeed.
+func (mr *MockHistoryServiceServerMockRecorder) BootstrapExecutionFeed(arg0, arg1 any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "BootstrapExecutionFeed", reflect.TypeOf((*MockHistoryServiceServer)(nil).BootstrapExecutionFeed), arg0, arg1)
+}
+
 // CancelNexusOperation mocks base method.
 func (m *MockHistoryServiceServer) CancelNexusOperation(arg0 context.Context, arg1 *historyservice.CancelNexusOperationRequest) (*historyservice.CancelNexusOperationResponse, error) {
 	m.ctrl.T.Helper()
@@ -2048,6 +2103,21 @@ func (m *MockHistoryServiceServer) GetDLQTasks(arg0 context.Context, arg1 *histo
 func (mr *MockHistoryServiceServerMockRecorder) GetDLQTasks(arg0, arg1 any) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "GetDLQTasks", reflect.TypeOf((*MockHistoryServiceServer)(nil).GetDLQTasks), arg0, arg1)
+}
+
+// GetExecutionFeed mocks base method.
+func (m *MockHistoryServiceServer) GetExecutionFeed(arg0 context.Context, arg1 *historyservice.GetExecutionFeedRequest) (*historyservice.GetExecutionFeedResponse, error) {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "GetExecutionFeed", arg0, arg1)
+	ret0, _ := ret[0].(*historyservice.GetExecutionFeedResponse)
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
+}
+
+// GetExecutionFeed indicates an expected call of GetExecutionFeed.
+func (mr *MockHistoryServiceServerMockRecorder) GetExecutionFeed(arg0, arg1 any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "GetExecutionFeed", reflect.TypeOf((*MockHistoryServiceServer)(nil).GetExecutionFeed), arg0, arg1)
 }
 
 // GetMutableState mocks base method.

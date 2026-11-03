@@ -11,6 +11,7 @@ import (
 	enumspb "go.temporal.io/api/enums/v1"
 	persistencespb "go.temporal.io/server/api/persistence/v1"
 	"go.temporal.io/server/chasm"
+	"go.temporal.io/server/common/definition"
 	"go.temporal.io/server/service/history/tasks"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
@@ -576,6 +577,7 @@ type (
 	InternalListConcreteExecutionsResponse struct {
 		States        []*InternalWorkflowMutableState `json:",omitempty"`
 		NextPageToken []byte
+		Keys          []definition.WorkflowKey
 	}
 
 	InternalGetHistoryTaskResponse struct {

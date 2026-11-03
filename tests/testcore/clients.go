@@ -6,12 +6,16 @@ import (
 	"sync"
 	"time"
 
+	contractpb "github.com/drasi-project/temporal-drasi/contracts/watch/v1"
 	"go.temporal.io/api/operatorservice/v1"
 	"go.temporal.io/api/workflowservice/v1"
 	"go.temporal.io/server/api/adminservice/v1"
 	"go.temporal.io/server/api/historyservice/v1"
 	"go.temporal.io/server/api/matchingservice/v1"
 	schedulerpb "go.temporal.io/server/chasm/lib/scheduler/gen/schedulerpb/v1"
+	watchpb "go.temporal.io/server/chasm/lib/watch/gen/watchpb/v1"
+	assignmentpb "go.temporal.io/server/chasm/lib/watchassignment/gen/assignmentpb/v1"
+	registrypb "go.temporal.io/server/chasm/lib/watchregistry/gen/registrypb/v1"
 	"go.temporal.io/server/client"
 	matchingclient "go.temporal.io/server/client/matching"
 	"go.temporal.io/server/common"
@@ -56,13 +60,18 @@ type frontendClients struct {
 	admin    adminservice.AdminServiceClient
 	frontend workflowservice.WorkflowServiceClient
 	operator operatorservice.OperatorServiceClient
+	drasi    contractpb.WatchServiceClient
 }
 
 type historyClients struct {
-	once      sync.Once
-	conn      *grpc.ClientConn
-	history   historyservice.HistoryServiceClient
-	scheduler schedulerpb.SchedulerServiceClient
+	once       sync.Once
+	conn       *grpc.ClientConn
+	history    historyservice.HistoryServiceClient
+	scheduler  schedulerpb.SchedulerServiceClient
+	watch      watchpb.ControlServiceClient
+	assignment assignmentpb.AssignmentServiceClient
+	registry   registrypb.RegistryServiceClient
+	plugins    registrypb.ClusterPluginServiceClient
 }
 
 type matchingClient struct {
@@ -109,6 +118,11 @@ func (c *clients) FrontendClient() workflowservice.WorkflowServiceClient {
 	return c.frontend.frontend
 }
 
+func (c *clients) DrasiClient() contractpb.WatchServiceClient {
+	c.ensureFrontend()
+	return c.frontend.drasi
+}
+
 func (c *clients) ensureFrontend() {
 	c.frontend.once.Do(func() {
 		conn, err := c.newConn(primitives.FrontendService)
@@ -119,6 +133,7 @@ func (c *clients) ensureFrontend() {
 		c.frontend.admin = adminservice.NewAdminServiceClient(conn)
 		c.frontend.frontend = workflowservice.NewWorkflowServiceClient(conn)
 		c.frontend.operator = operatorservice.NewOperatorServiceClient(conn)
+		c.frontend.drasi = contractpb.NewWatchServiceClient(conn)
 	})
 }
 
@@ -132,6 +147,26 @@ func (c *clients) SchedulerClient() schedulerpb.SchedulerServiceClient {
 	return c.history.scheduler
 }
 
+func (c *clients) WatchControlClient() watchpb.ControlServiceClient {
+	c.ensureHistory()
+	return c.history.watch
+}
+
+func (c *clients) WatchRegistryClient() registrypb.RegistryServiceClient {
+	c.ensureHistory()
+	return c.history.registry
+}
+
+func (c *clients) WatchAssignmentClient() assignmentpb.AssignmentServiceClient {
+	c.ensureHistory()
+	return c.history.assignment
+}
+
+func (c *clients) ClusterPluginClient() registrypb.ClusterPluginServiceClient {
+	c.ensureHistory()
+	return c.history.plugins
+}
+
 func (c *clients) ensureHistory() {
 	c.history.once.Do(func() {
 		conn, err := c.newConn(primitives.HistoryService)
@@ -141,6 +176,10 @@ func (c *clients) ensureHistory() {
 		c.history.conn = conn
 		c.history.history = historyservice.NewHistoryServiceClient(conn)
 		c.history.scheduler = schedulerpb.NewSchedulerServiceClient(conn)
+		c.history.watch = watchpb.NewControlServiceClient(conn)
+		c.history.assignment = assignmentpb.NewAssignmentServiceClient(conn)
+		c.history.registry = registrypb.NewRegistryServiceClient(conn)
+		c.history.plugins = registrypb.NewClusterPluginServiceClient(conn)
 	})
 }
 

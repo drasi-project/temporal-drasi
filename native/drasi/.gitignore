@@ -1,0 +1,5 @@
+/target/
+/.verification/
+/lib/
+/.upstream/
+__pycache__/

@@ -140,6 +140,8 @@ require (
 	github.com/cncf/xds/go v0.0.0-20260202195803-dba9d589def2 // indirect
 	github.com/cpuguy83/go-md2man/v2 v2.0.7 // indirect
 	github.com/davecgh/go-spew v1.1.2-0.20180830191138-d8f796af33cc // indirect
+	github.com/drasi-project/temporal-drasi/contracts/watch v0.0.0
+	github.com/drasi-project/temporal-drasi/sdk/go v0.0.0
 	github.com/dustin/go-humanize v1.0.1 // indirect
 	github.com/emicklei/go-restful/v3 v3.13.0 // indirect
 	github.com/envoyproxy/go-control-plane/envoy v1.37.0 // indirect
@@ -226,3 +228,7 @@ require (
 )
 
 tool golang.org/x/perf/cmd/benchstat
+
+replace github.com/drasi-project/temporal-drasi/contracts/watch => ./contracts/watch
+
+replace github.com/drasi-project/temporal-drasi/sdk/go => ./sdk/go

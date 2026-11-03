@@ -69,6 +69,7 @@ import (
 	"go.temporal.io/server/service/history/configs"
 	"go.temporal.io/server/service/history/consts"
 	"go.temporal.io/server/service/history/events"
+	"go.temporal.io/server/service/history/executionfeed"
 	"go.temporal.io/server/service/history/historybuilder"
 	"go.temporal.io/server/service/history/hsm"
 	"go.temporal.io/server/service/history/hsm/callbacks"
@@ -292,6 +293,11 @@ type (
 		// during replay, set via SetReplayEventBatchID by the rebuilder. It is common.EmptyEventID
 		// on the live path, where the batch ID is derived from the batch being built instead.
 		replayEventBatchID int64
+
+		executionFeedPrevious     tasks.FeedState
+		executionFeedFacts        []tasks.FeedFact
+		executionFeedBaseline     bool
+		executionFeedCaptureEpoch int64
 	}
 
 	lastUpdatedStateTransitionGetter interface {
@@ -408,6 +414,7 @@ func NewMutableState(
 		ExecutionStats:         &persistencespb.ExecutionStats{HistorySize: 0},
 		SubStateMachinesByType: make(map[string]*persistencespb.StateMachineMap),
 	}
+	s.executionFeedCaptureEpoch = s.currentExecutionFeedCaptureEpoch()
 	s.executionInfo.TaskGenerationShardClockTimestamp = shard.CurrentVectorClock().GetClock()
 	s.approximateSize += s.executionInfo.Size()
 
@@ -604,6 +611,9 @@ func NewMutableStateFromDB(
 	}
 	if mutableState.executionInfo.GetTimeSkippingInfo() != nil {
 		mutableState.wrapTimeSourceWithTimeSkipping()
+	}
+	if err := mutableState.initializeExecutionFeed(); err != nil {
+		return nil, err
 	}
 	return mutableState, nil
 }
@@ -4635,6 +4645,12 @@ func (ms *MutableStateImpl) AddActivityTaskStartedEvent(
 		return nil, err
 	}
 	ms.syncActivityTasks[ai.ScheduledEventId] = struct{}{}
+	if ms.executionFeedEnabled() {
+		ms.executionFeedFacts = append(ms.executionFeedFacts, tasks.FeedFact{
+			Entity: "ACTIVITY", ID: ai.ActivityId, ScheduledEventID: ai.ScheduledEventId, Attempt: ai.Attempt,
+			Transition: "STARTED", Time: executionfeed.Time(ai.StartedTime),
+		})
+	}
 	return nil, nil
 }
 
@@ -6989,6 +7005,18 @@ func (ms *MutableStateImpl) RetryActivity(
 	ai *persistencespb.ActivityInfo,
 	activityFailure *failurepb.Failure,
 ) (enumspb.RetryState, error) {
+	attempt := ai.Attempt
+	state, err := ms.retryActivity(ai, activityFailure)
+	if err == nil && state == enumspb.RETRY_STATE_IN_PROGRESS && ms.executionFeedEnabled() {
+		ms.recordExecutionFeedRetry(ai, attempt, activityFailure)
+	}
+	return state, err
+}
+
+func (ms *MutableStateImpl) retryActivity(
+	ai *persistencespb.ActivityInfo,
+	activityFailure *failurepb.Failure,
+) (enumspb.RetryState, error) {
 	opTag := tag.WorkflowActionActivityTaskRetry
 	if err := ms.checkMutability(opTag); err != nil {
 		return enumspb.RETRY_STATE_INTERNAL_SERVER_ERROR, err
@@ -7763,9 +7791,10 @@ func (ms *MutableStateImpl) CloseTransactionAsMutation(
 	}
 
 	workflowMutation := &persistence.WorkflowMutation{
-		ExecutionInfo:  ms.executionInfo,
-		ExecutionState: ms.executionState,
-		NextEventID:    ms.hBuilder.NextEventID(),
+		ExecutionInfo:             ms.executionInfo,
+		ExecutionState:            ms.executionState,
+		NextEventID:               ms.hBuilder.NextEventID(),
+		ExecutionFeedCaptureEpoch: ms.executionFeedCaptureEpoch,
 
 		UpsertActivityInfos:       ms.updateActivityInfos,
 		DeleteActivityInfos:       ms.deleteActivityInfos,
@@ -7818,9 +7847,10 @@ func (ms *MutableStateImpl) CloseTransactionAsSnapshot(
 	}
 
 	workflowSnapshot := &persistence.WorkflowSnapshot{
-		ExecutionInfo:  ms.executionInfo,
-		ExecutionState: ms.executionState,
-		NextEventID:    ms.hBuilder.NextEventID(),
+		ExecutionInfo:             ms.executionInfo,
+		ExecutionState:            ms.executionState,
+		NextEventID:               ms.hBuilder.NextEventID(),
+		ExecutionFeedCaptureEpoch: ms.executionFeedCaptureEpoch,
 
 		ActivityInfos:       ms.pendingActivityInfoIDs,
 		TimerInfos:          ms.pendingTimerInfoIDs,
@@ -8017,6 +8047,9 @@ func (ms *MutableStateImpl) closeTransaction(
 
 	ms.executionInfo.StateTransitionCount += 1
 	ms.executionInfo.LastUpdateTime = timestamppb.New(ms.timeSource.Now())
+	if err := ms.captureExecutionFeed(ctx, transactionPolicy, eventBatches); err != nil {
+		return closeTransactionResult{}, err
+	}
 
 	// We generate checksum here based on the assumption that the returned
 	// snapshot object is considered immutable. As of this writing, the only
@@ -8681,6 +8714,8 @@ func (ms *MutableStateImpl) closeTransactionPrepareReplicationTasks(
 }
 
 func (ms *MutableStateImpl) cleanupTransaction() error {
+	ms.executionFeedFacts = nil
+	ms.executionFeedBaseline = false
 	ms.updateActivityInfos = make(map[int64]*persistencespb.ActivityInfo)
 	ms.deleteActivityInfos = make(map[int64]struct{})
 	ms.syncActivityTasks = make(map[int64]struct{})

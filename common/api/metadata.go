@@ -228,7 +228,7 @@ func GetMethodMetadata(fullApiName string) MethodMetadata {
 	case strings.HasPrefix(fullApiName, AdminServicePrefix):
 		return MethodMetadata{Scope: ScopeCluster, Access: AccessAdmin}
 	default:
-		return MethodMetadata{Scope: ScopeUnknown, Access: AccessUnknown}
+		return drasiMethodMetadata(fullApiName)
 	}
 }
 

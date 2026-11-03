@@ -1,0 +1,95 @@
+syntax = "proto3";
+
+package temporal.server.chasm.watchregistry.v1;
+
+import "chasm/lib/watchregistry/proto/v1/plugin_state.proto";
+import "chasm/lib/watchregistry/proto/v1/state.proto";
+import "drasi/watch/v1/service.proto";
+import "temporal/server/api/common/v1/api_category.proto";
+import "temporal/server/api/routing/v1/extension.proto";
+
+option go_package = "go.temporal.io/server/chasm/lib/watchregistry/gen/registrypb/v1;registrypb";
+
+// ClusterPluginService retains cluster intent in History and does not authorize public requests.
+service ClusterPluginService {
+  rpc InstallClusterPlugin(InstallClusterPluginRequest) returns (InstallClusterPluginResponse) {
+    option (temporal.server.api.routing.v1.routing).business_id = "execution_id";
+    option (temporal.server.api.common.v1.api_category).category = API_CATEGORY_STANDARD;
+  }
+  rpc ReadClusterPlugins(ReadClusterPluginsRequest) returns (ReadClusterPluginsResponse) {
+    option (temporal.server.api.routing.v1.routing).business_id = "execution_id";
+    option (temporal.server.api.common.v1.api_category).category = API_CATEGORY_STANDARD;
+  }
+  rpc LoadClusterPlugin(LoadClusterPluginRequest) returns (LoadClusterPluginResponse) {
+    option (temporal.server.api.routing.v1.routing).business_id = "execution_id";
+    option (temporal.server.api.common.v1.api_category).category = API_CATEGORY_STANDARD;
+  }
+}
+
+message InstallClusterPluginRequest {
+  // NamespaceId must identify the local temporal-system namespace.
+  string namespace_id = 1;
+  // ExecutionId must be the immutable cluster plugin root business ID.
+  string execution_id = 2;
+  // Request is the original public request whose identity is retained.
+  drasi.watch.v1.InstallPluginRequest request = 3;
+  oneof resolution {
+    // Plugin is server-resolved artifact metadata, not trusted host verification.
+    drasi.watch.v1.Plugin plugin = 4;
+    // Rejection is a semantic failure resolved before the History transaction.
+    Rejection rejection = 5;
+  }
+}
+
+message InstallClusterPluginResponse {
+  oneof outcome {
+    // Plugin is detached accepted metadata without runtime-dependent claims.
+    drasi.watch.v1.Plugin plugin = 1;
+    // Rejection is the original retained semantic failure.
+    Rejection rejection = 2;
+  }
+}
+
+message LoadClusterPluginRequest {
+  // NamespaceId must identify the local temporal-system namespace.
+  string namespace_id = 1;
+  // ExecutionId must be the immutable cluster plugin root business ID.
+  string execution_id = 2;
+  // Request is the original public request whose identity is retained.
+  drasi.watch.v1.LoadPluginRequest request = 3;
+  // Rejection optionally preserves a semantic refusal before the transaction.
+  Rejection rejection = 4;
+}
+
+message LoadClusterPluginResponse {
+  oneof outcome {
+    // Digest identifies the accepted effect, not today's desired or observed state.
+    string digest = 1;
+    // Rejection is the original retained semantic failure.
+    Rejection rejection = 2;
+  }
+}
+
+message ReadClusterPluginsRequest {
+  // NamespaceId must identify the local temporal-system namespace.
+  string namespace_id = 1;
+  // ExecutionId must be the immutable cluster plugin root business ID.
+  string execution_id = 2;
+  oneof operation {
+    // Snapshot must be true to read the complete bounded installation cut.
+    bool snapshot = 3;
+    // RequestId selects one permanent receipt without consulting current catalogs.
+    string request_id = 4;
+  }
+}
+
+message ReadClusterPluginsResponse {
+  // Generation identifies the committed installation cut.
+  uint64 generation = 1;
+  // Plugins is a digest-sorted snapshot and contains no host observation.
+  repeated drasi.watch.v1.Plugin plugins = 2;
+  // Receipt is populated only for a matching request identity.
+  ClusterPluginReceipt receipt = 3;
+  // DesiredLoads is a snapshot of desired digests keyed by native plugin ID.
+  map<string, string> desired_loads = 4;
+}

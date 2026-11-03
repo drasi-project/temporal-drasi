@@ -16,6 +16,7 @@ import (
 	"go.temporal.io/server/common/persistence/serialization"
 	"go.temporal.io/server/common/primitives/timestamp"
 	"go.temporal.io/server/common/softassert"
+	"go.temporal.io/server/service/history/tasks"
 )
 
 const (
@@ -931,6 +932,37 @@ func (d *MutableStateStore) DeleteWorkflowExecution(
 	ctx context.Context,
 	request *p.DeleteWorkflowExecutionRequest,
 ) error {
+	if request.RangeID != 0 || request.ExecutionFeedTask != nil {
+		batch := d.Session.NewBatch(gocql.LoggedBatch).WithContext(ctx)
+		if task := request.ExecutionFeedTask; task != nil {
+			if request.ExecutionFeedTaskBlob == nil {
+				return serviceerror.NewInvalidArgument("execution feed deletion task is not serialized")
+			}
+			if err := applyTasks(batch, request.ShardID, map[tasks.Category][]p.InternalHistoryTask{
+				tasks.CategoryExecutionFeed: {{Key: task.GetKey(), Blob: request.ExecutionFeedTaskBlob}},
+			}); err != nil {
+				return err
+			}
+		}
+		batch.Query(templateDeleteWorkflowExecutionMutableStateQuery,
+			request.ShardID, rowTypeExecution, request.NamespaceID, request.WorkflowID, request.RunID,
+			defaultVisibilityTimestamp, rowTypeExecutionTaskID)
+		batch.Query(templateUpdateLeaseQuery, request.RangeID, request.ShardID, rowTypeShard,
+			rowTypeShardNamespaceID, rowTypeShardWorkflowID, rowTypeShardRunID,
+			defaultVisibilityTimestamp, rowTypeShardTaskID, request.RangeID)
+		previous := make(map[string]any)
+		applied, iter, err := d.Session.MapExecuteBatchCAS(batch, previous)
+		if err != nil {
+			return gocql.ConvertError("DeleteWorkflowExecution", err)
+		}
+		if err := iter.Close(); err != nil {
+			return gocql.ConvertError("DeleteWorkflowExecution", err)
+		}
+		if !applied {
+			return &p.ShardOwnershipLostError{ShardID: request.ShardID, Msg: "workflow deletion lost shard ownership"}
+		}
+		return nil
+	}
 	query := d.Session.Query(templateDeleteWorkflowExecutionMutableStateQuery,
 		request.ShardID,
 		rowTypeExecution,
@@ -1094,6 +1126,9 @@ func (d *MutableStateStore) ListConcreteExecutions(
 	}
 	if len(iter.PageState()) > 0 {
 		response.NextPageToken = iter.PageState()
+	}
+	if err := iter.Close(); err != nil {
+		return nil, gocql.ConvertError("ListConcreteExecutions", err)
 	}
 	return response, nil
 }

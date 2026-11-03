@@ -13,6 +13,10 @@ func (wt *WorkflowTags) extractFromHistoryServiceServerMessage(message any) []ta
 		return nil
 	case *historyservice.AddTasksResponse:
 		return nil
+	case *historyservice.BootstrapExecutionFeedRequest:
+		return nil
+	case *historyservice.BootstrapExecutionFeedResponse:
+		return nil
 	case *historyservice.CancelNexusOperationRequest:
 		return []tag.Tag{
 			tag.OperationID(r.GetRequest().GetOperationId()),
@@ -118,6 +122,10 @@ func (wt *WorkflowTags) extractFromHistoryServiceServerMessage(message any) []ta
 	case *historyservice.GetDLQTasksRequest:
 		return nil
 	case *historyservice.GetDLQTasksResponse:
+		return nil
+	case *historyservice.GetExecutionFeedRequest:
+		return nil
+	case *historyservice.GetExecutionFeedResponse:
 		return nil
 	case *historyservice.GetMutableStateRequest:
 		return []tag.Tag{

@@ -10,3 +10,15 @@ lint:
     - DEFAULT
   except:
     - PACKAGE_DIRECTORY_MATCH
+  ignore_only:
+    # These internal methods return the same durable state after each operation.
+    RPC_REQUEST_RESPONSE_UNIQUE:
+      - chasm/lib/watch/proto/v1/service.proto
+      - chasm/lib/watchassignment/proto/v1/service.proto
+    RPC_RESPONSE_STANDARD_NAME:
+      - chasm/lib/watch/proto/v1/service.proto
+      - chasm/lib/watchassignment/proto/v1/service.proto
+      - chasm/lib/watchregistry/proto/v1/service.proto
+    # Persisted zero already means waiting for the initial native snapshot.
+    ENUM_ZERO_VALUE_SUFFIX:
+      - chasm/lib/watch/proto/v1/state.proto

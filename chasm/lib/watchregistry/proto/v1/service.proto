@@ -1,0 +1,140 @@
+syntax = "proto3";
+
+package temporal.server.chasm.watchregistry.v1;
+
+import "chasm/lib/watchregistry/proto/v1/state.proto";
+import "drasi/watch/v1/service.proto";
+import "temporal/server/api/common/v1/api_category.proto";
+import "temporal/server/api/routing/v1/extension.proto";
+
+option go_package = "go.temporal.io/server/chasm/lib/watchregistry/gen/registrypb/v1;registrypb";
+
+// RegistryService is a private History API and does not authorize browser requests.
+service RegistryService {
+  rpc Mutate(MutateRequest) returns (MutationResult) {
+    option (temporal.server.api.routing.v1.routing).business_id = "execution_id";
+    option (temporal.server.api.common.v1.api_category).category = API_CATEGORY_STANDARD;
+  }
+  rpc Read(ReadRequest) returns (ReadResponse) {
+    option (temporal.server.api.routing.v1.routing).business_id = "execution_id";
+    option (temporal.server.api.common.v1.api_category).category = API_CATEGORY_STANDARD;
+  }
+}
+
+message MutateRequest {
+  // NamespaceId routes to the owning Temporal namespace.
+  string namespace_id = 1;
+  // ExecutionId must be the immutable namespace registry business ID.
+  string execution_id = 2;
+  // Retry incarnation is resolved from retained delivery state before authorization.
+  string retry_incarnation = 3;
+  oneof operation {
+    // CreateSource creates a reusable source definition.
+    drasi.watch.v1.CreateSourceRequest create_source = 10;
+    // UpdateSource replaces the source definition using compare-and-swap.
+    drasi.watch.v1.UpdateSourceRequest update_source = 11;
+    // DeleteSource disables the source after checking pinned dependents.
+    drasi.watch.v1.SourceOperationRequest delete_source = 12;
+    // StartSource requests source startup without claiming readiness.
+    drasi.watch.v1.SourceOperationRequest start_source = 13;
+    // StopSource disables source intake.
+    drasi.watch.v1.SourceOperationRequest stop_source = 14;
+    // CreateQuery creates a query with pinned source revisions.
+    drasi.watch.v1.CreateQueryRequest create_query = 20;
+    // UpdateQuery replaces the query definition using compare-and-swap.
+    drasi.watch.v1.UpdateQueryRequest update_query = 21;
+    // DeleteQuery disables the query after checking pinned dependents.
+    drasi.watch.v1.QueryOperationRequest delete_query = 22;
+    // StartQuery requests query startup without claiming readiness.
+    drasi.watch.v1.QueryOperationRequest start_query = 23;
+    // StopQuery disables query intake.
+    drasi.watch.v1.QueryOperationRequest stop_query = 24;
+    // CreateWatch creates a watch with a pinned query revision.
+    drasi.watch.v1.CreateWatchRequest create_watch = 30;
+    // UpdateWatch replaces the watch definition without rewriting accepted effects.
+    drasi.watch.v1.UpdateWatchRequest update_watch = 31;
+    // DeleteWatch disables new acceptance while accepted effects may drain.
+    drasi.watch.v1.WatchOperationRequest delete_watch = 32;
+    // PauseWatch disables new acceptance while accepted effects may drain.
+    drasi.watch.v1.WatchOperationRequest pause_watch = 33;
+    // ResumeWatch requests renewed acceptance.
+    drasi.watch.v1.WatchOperationRequest resume_watch = 34;
+    // CancelWatch cancels a one-shot condition without retracting sent RPCs.
+    drasi.watch.v1.WatchOperationRequest cancel_watch = 35;
+    // ResetWatch requests an explicit new output incarnation.
+    drasi.watch.v1.ResetWatchRequest reset_watch = 36;
+    // RetryDelivery authorizes one immutable retry command without changing the definition.
+    drasi.watch.v1.RetryDeliveryRequest retry_delivery = 37;
+  }
+}
+
+message RevisionLookup {
+  // Kind selects the namespace resource type.
+  ResourceKind kind = 1;
+  // Ref pins the exact immutable revision.
+  drasi.watch.v1.ResourceRef ref = 2;
+}
+
+message WatchHistoryLookup {
+  // Id selects one public Watch, including its deleted lifetimes.
+  string id = 1;
+  // AfterRevision excludes lifetimes beginning at or before this revision.
+  uint64 after_revision = 2;
+  // Generation refuses continuation after the registry changes; zero starts a read.
+  uint64 generation = 3;
+  // Limit bounds the number of returned lifetimes.
+  uint32 limit = 4;
+}
+
+message WatchLifetime {
+  // Incarnation identifies one immutable control execution.
+  string incarnation = 1;
+  // FirstRevision is the first retained definition in this lifetime.
+  uint64 first_revision = 2;
+  // LastRevision bounds the possible revision used for control creation.
+  uint64 last_revision = 3;
+}
+
+message ReadRequest {
+  // NamespaceId routes to the owning Temporal namespace.
+  string namespace_id = 1;
+  // ExecutionId must be the immutable namespace registry business ID.
+  string execution_id = 2;
+  oneof operation {
+    // GetSource reads the current source definition and desired state.
+    drasi.watch.v1.GetSourceRequest get_source = 10;
+    // ListSources consistently lists all source records, including cleanup intent.
+    drasi.watch.v1.ListSourcesRequest list_sources = 11;
+    // GetQuery reads the current query definition and desired state.
+    drasi.watch.v1.GetQueryRequest get_query = 20;
+    // ListQueries consistently lists all query records, including cleanup intent.
+    drasi.watch.v1.ListQueriesRequest list_queries = 21;
+    // GetWatch reads the current watch definition and desired state.
+    drasi.watch.v1.GetWatchRequest get_watch = 30;
+    // ListWatches lists watches, optionally filtered by an exact owner run.
+    drasi.watch.v1.ListWatchesRequest list_watches = 31;
+    // Revision resolves an immutable pin, even after definition replacement or deletion.
+    RevisionLookup revision = 40;
+    // WatchHistory resolves retained lifetimes without exposing action configuration.
+    WatchHistoryLookup watch_history = 41;
+    // DeliveryRetry reads an original retry authorization before resolving current state.
+    drasi.watch.v1.RetryDeliveryRequest delivery_retry = 42;
+    // QuerySources atomically resolves every source pin without registering the query.
+    drasi.watch.v1.ValidateQueryRequest query_sources = 43;
+  }
+}
+
+message ReadResponse {
+  // Records are copies of committed desired definitions, not runtime status.
+  repeated Record records = 1;
+  // NextPageToken continues at this generation or fails explicitly if it changed.
+  string next_page_token = 2;
+  // Generation is the committed registry generation observed by this read.
+  uint64 generation = 3;
+  // WatchLifetimes contains bounded immutable identities for a Watch history read.
+  repeated WatchLifetime watch_lifetimes = 4;
+  // MoreLifetimes indicates that another history read can continue after this page.
+  bool more_lifetimes = 5;
+  // DeliveryRetry is an original authorization or semantic rejection, when retained.
+  MutationResult delivery_retry = 6;
+}
