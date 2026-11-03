@@ -16,7 +16,8 @@ bash native/drasi/verify.sh
 The build-tag check verifies native file selection requires both cgo and
 `temporal_with_drasi`, including with `temporal_minimal`. Nested Go modules run
 their tests from their own module roots, not through the server's test selection.
-The native verifier includes regression checks for both boundaries.
+Source inventories exclude ignored native build artifacts and upstream caches.
+The native verifier includes regression checks for these boundaries.
 
 ## Real-service UI verification fixture
 

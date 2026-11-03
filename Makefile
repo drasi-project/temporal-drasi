@@ -114,9 +114,9 @@ INTERNAL_BINPB := $(PROTO_ROOT)/image.bin
 CHASM_BINPB := $(PROTO_ROOT)/chasm.bin
 PROTO_OUT := api
 
-ALL_SRC         := $(shell find . -name "*.go")
+ALL_SRC         := $(addprefix ./,$(shell git ls-files --cached --others --exclude-standard -- '*.go'))
 ALL_SRC         += go.mod
-ALL_SCRIPTS     := $(shell find . -name "*.sh")
+ALL_SCRIPTS     := $(addprefix ./,$(shell git ls-files --cached --others --exclude-standard -- '*.sh'))
 
 MAIN_BRANCH    := main
 

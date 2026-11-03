@@ -2,6 +2,7 @@
 
 import pathlib
 import subprocess
+import tempfile
 import unittest
 
 
@@ -21,6 +22,20 @@ def run_make(recipe: str, *arguments: str) -> subprocess.CompletedProcess[str]:
 
 
 class BuildSelectionTests(unittest.TestCase):
+    def test_source_inventory_excludes_ignored_build_artifacts(self) -> None:
+        cache = ROOT / "native/drasi/.verification"
+        cache.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(prefix="build-selection-", dir=cache) as directory:
+            paths = [pathlib.Path(directory) / "ignored_test.go", pathlib.Path(directory) / "ignored.sh"]
+            for path in paths:
+                path.write_text("")
+            result = run_make("\t@printf '%s\\n' '$(ALL_SRC) $(ALL_SCRIPTS)'\n")
+            self.assertEqual(result.returncode, 0, result.stderr)
+            inventory = result.stdout.split()
+            for path in paths:
+                with self.subTest(artifact=path.name):
+                    self.assertNotIn("./" + path.relative_to(ROOT).as_posix(), inventory)
+
     def test_root_tests_respect_module_boundaries(self) -> None:
         result = run_make("\t@printf '%s\\n' '$(TEST_DIRS)'\n")
         self.assertEqual(result.returncode, 0, result.stderr)
