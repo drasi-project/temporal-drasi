@@ -9,8 +9,14 @@ cgo.
 ```sh
 bash native/drasi/build.sh
 CGO_ENABLED=1 go test -tags test_dep,temporal_with_drasi ./service/watch/native
+make build-tags-check
 bash native/drasi/verify.sh
 ```
+
+The build-tag check verifies native file selection requires both cgo and
+`temporal_with_drasi`, including with `temporal_minimal`. Nested Go modules run
+their tests from their own module roots, not through the server's test selection.
+The native verifier includes regression checks for both boundaries.
 
 ## Real-service UI verification fixture
 
@@ -257,12 +263,14 @@ The prerequisite change is proposed upstream in
 that proposal does not make this local pin a trusted-main publication.
 
 `build.sh` and `verify.sh` run `prepare-core.py`. It checks the complete patch's
-SHA256 `b16241b0d77acb9a2c3922c7ff16ed96d55279e66574ac8593174f1bd2ebce47`,
+SHA256 `e876e1de337c0598b0ac4983da770d63e4682a92d8c5c1c62f4e4fa25682018a`,
 fetches only the pinned public base into an isolated ignored checkout, and checks
 the complete patched Git tree
-`029e8390bfc0a6e426ace96012593e743b068f65`. This includes the reviewed
+`e617146537075c71fc89445aa44ba657add55d26`. This includes the reviewed
 cancellation, retained-publication, interrupted-reset and checkpoint-admission
-corrections without changing the SDK/ABI family or upstream lock. Cargo overrides use only
+corrections and joins the synthetic future-queue source when stop cancellation
+interrupts bootstrap-completion delivery. The SDK/ABI family and upstream lock
+are unchanged. Cargo overrides use only
 repository-relative paths in a cache keyed by that tree; old verified trees
 remain untouched when the pin changes. No companion worktree
 or shared Cargo cache is modified. Preparation is serialized and publishes the
@@ -291,6 +299,9 @@ The initial SDK 0.12 candidate tree
 `198a2fbe0e9eb5f819d4ac5cce5622252d6ffe72` is also retained in its separate
 cache and Git history. Its evidence does not substitute for verifying the
 reviewed tree, despite their identical package versions.
+The intermediate reviewed tree
+`029e8390bfc0a6e426ace96012593e743b068f65` likewise remains isolated; it does not
+include the final cancellation-safe future-queue join.
 
 The verifier also runs the prepared SDK's recovery, durable bootstrap, and
 preserving-removal tests plus SDK Clippy in a disposable checkout:

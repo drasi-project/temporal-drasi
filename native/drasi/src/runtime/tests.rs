@@ -522,6 +522,7 @@ async fn incompatible_build_state_is_refused_before_sdk_or_retirement_writes() {
         None,
         Some("207ef6f3c4cd12d854dbe512c9b670282f996284+development.7bf4530999d24a435db70a6ac6e07c27b26253ac"),
         Some("9469f3e01ff22c4f0092c9900dfbd5051ceae545+development.198a2fbe0e9eb5f819d4ac5cce5622252d6ffe72"),
+        Some("9469f3e01ff22c4f0092c9900dfbd5051ceae545+development.029e8390bfc0a6e426ace96012593e743b068f65"),
     ] {
         let workspace = Workspace::new();
         let mut configuration = workspace.config();

@@ -121,7 +121,8 @@ ALL_SCRIPTS     := $(shell find . -name "*.sh")
 MAIN_BRANCH    := main
 
 # If you update these dirs, please also update in CategoryDirs find_altered_tests.go
-TEST_DIRS       := $(sort $(dir $(filter %_test.go,$(ALL_SRC))))
+GO_SUBMODULE_DIRS := $(addprefix ./,$(dir $(shell git ls-files --cached --others --exclude-standard -- '*/go.mod')))
+TEST_DIRS       := $(filter-out $(addsuffix %,$(GO_SUBMODULE_DIRS)),$(sort $(dir $(filter %_test.go,$(ALL_SRC)))))
 FUNCTIONAL_TEST_ROOT          := ./tests
 FUNCTIONAL_TEST_XDC_ROOT      := ./tests/xdc
 FUNCTIONAL_TEST_NDC_ROOT      := ./tests/ndc
@@ -547,9 +548,10 @@ workflowcheck: $(WORKFLOWCHECK)
 comma := ,
 
 # Packages that temporal_minimal compiles out of the server unless the temporal_with_* build tag at the
-# end of the variable name is set. Each temporal_with_* tag needs one.
+# end of the variable name is set. Native opt-ins instead declare their cgo package.
 EXCLUDED_PACKAGES_temporal_with_gstorage := cloud.google.com/go/storage
 EXCLUDED_PACKAGES_temporal_with_elasticsearch := github.com/olivere/elastic/v7
+OPT_IN_CGO_PACKAGE_temporal_with_drasi := go.temporal.io/server/service/watch/native
 
 # $(call server-deps,<tags>): the packages the server depends on when built with <tags>.
 server-deps = $(shell CGO_ENABLED=$(CGO_ENABLED) go list -tags $(ALL_BUILD_TAGS),$(1) -deps ./cmd/server)
@@ -562,13 +564,27 @@ expect-deps = $(if $(filter-out $(call server-deps,$(1)),$(2)),\
 reject-deps = $(if $(filter $(2),$(call server-deps,$(1))),\
 	$(error Server built with tags "$(1)" depends on: $(filter $(2),$(call server-deps,$(1)))))
 
+# $(call expect-cgo-mode,<tags>,<cgo-enabled>,<package>,<mode>): checks file selection without linking a native library.
+expect-cgo-mode = $(if $(filter $(4),$(shell CGO_ENABLED=$(2) go list -tags $(ALL_BUILD_TAGS),$(1) \
+	-f '{{if .CgoFiles}}native{{else}}stub{{end}}' $(3))),,\
+	$(error Package $(3) with tags "$(1)" and CGO_ENABLED=$(2) must select $(4) files))
+
+define check-opt-in-cgo-tag
+$(call expect-cgo-mode,,1,$(OPT_IN_CGO_PACKAGE_$(1)),stub)
+$(call expect-cgo-mode,temporal_minimal,1,$(OPT_IN_CGO_PACKAGE_$(1)),stub)
+$(foreach tags,$(1) temporal_minimal$(comma)$(1),\
+	$(call expect-cgo-mode,$(tags),0,$(OPT_IN_CGO_PACKAGE_$(1)),stub)\
+	$(call expect-cgo-mode,$(tags),1,$(OPT_IN_CGO_PACKAGE_$(1)),native))
+endef
+
 # $(call check-build-tag,<tag>): temporal_minimal must compile the packages of <tag> out of the server,
-# and adding <tag> must bring them back.
+# and adding <tag> must bring them back. Native opt-ins require both their tag and cgo.
 define check-build-tag
+$(if $(OPT_IN_CGO_PACKAGE_$(1)),$(call check-opt-in-cgo-tag,$(1)),\
 $(if $(EXCLUDED_PACKAGES_$(1)),,$(error EXCLUDED_PACKAGES_$(1) is not set))
 $(call expect-deps,,$(EXCLUDED_PACKAGES_$(1)))
 $(call reject-deps,temporal_minimal,$(EXCLUDED_PACKAGES_$(1)))
-$(call expect-deps,temporal_minimal$(comma)$(1),$(EXCLUDED_PACKAGES_$(1)))
+$(call expect-deps,temporal_minimal$(comma)$(1),$(EXCLUDED_PACKAGES_$(1))))
 endef
 
 # Compiles every package with temporal_minimal, and checks the packages each temporal_with_* tag

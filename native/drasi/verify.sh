@@ -15,6 +15,7 @@ export GOTMPDIR="$native/.verification/go"
 export RUST_LOG="${RUST_LOG:-error}"
 python3 "$native/prepare-core.py"
 python3 "$native/tests/test-prepare-core.py"
+python3 "$native/tests/test-build-selection.py"
 python3 "$native/tests/test-sdk-recovery.py"
 CGO_ENABLED=0 go test -count=1 -tags test_dep ./cmd/tools/getproto ./cmd/tools/protogen
 CGO_ENABLED=0 go test -count=1 -tags test_dep \
