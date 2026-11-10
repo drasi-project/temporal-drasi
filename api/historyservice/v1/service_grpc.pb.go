@@ -56,6 +56,8 @@ const (
 	HistoryService_DescribeHistoryHost_FullMethodName                    = "/temporal.server.api.historyservice.v1.HistoryService/DescribeHistoryHost"
 	HistoryService_CloseShard_FullMethodName                             = "/temporal.server.api.historyservice.v1.HistoryService/CloseShard"
 	HistoryService_GetShard_FullMethodName                               = "/temporal.server.api.historyservice.v1.HistoryService/GetShard"
+	HistoryService_BootstrapExecutionFeed_FullMethodName                 = "/temporal.server.api.historyservice.v1.HistoryService/BootstrapExecutionFeed"
+	HistoryService_GetExecutionFeed_FullMethodName                       = "/temporal.server.api.historyservice.v1.HistoryService/GetExecutionFeed"
 	HistoryService_RemoveTask_FullMethodName                             = "/temporal.server.api.historyservice.v1.HistoryService/RemoveTask"
 	HistoryService_GetReplicationMessages_FullMethodName                 = "/temporal.server.api.historyservice.v1.HistoryService/GetReplicationMessages"
 	HistoryService_GetDLQReplicationMessages_FullMethodName              = "/temporal.server.api.historyservice.v1.HistoryService/GetDLQReplicationMessages"
@@ -246,6 +248,10 @@ type HistoryServiceClient interface {
 	CloseShard(ctx context.Context, in *CloseShardRequest, opts ...grpc.CallOption) (*CloseShardResponse, error)
 	// GetShard gets the ShardInfo
 	GetShard(ctx context.Context, in *GetShardRequest, opts ...grpc.CallOption) (*GetShardResponse, error)
+	// BootstrapExecutionFeed commits one primary-enumeration page through the owning shard.
+	BootstrapExecutionFeed(ctx context.Context, in *BootstrapExecutionFeedRequest, opts ...grpc.CallOption) (*BootstrapExecutionFeedResponse, error)
+	// GetExecutionFeed reads a namespace-filtered interval below the durable ingestion cutoff.
+	GetExecutionFeed(ctx context.Context, in *GetExecutionFeedRequest, opts ...grpc.CallOption) (*GetExecutionFeedResponse, error)
 	// RemoveTask remove task based on type, taskid, shardid.
 	RemoveTask(ctx context.Context, in *RemoveTaskRequest, opts ...grpc.CallOption) (*RemoveTaskResponse, error)
 	// GetReplicationMessages return replication messages based on the read level
@@ -712,6 +718,24 @@ func (c *historyServiceClient) CloseShard(ctx context.Context, in *CloseShardReq
 func (c *historyServiceClient) GetShard(ctx context.Context, in *GetShardRequest, opts ...grpc.CallOption) (*GetShardResponse, error) {
 	out := new(GetShardResponse)
 	err := c.cc.Invoke(ctx, HistoryService_GetShard_FullMethodName, in, out, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *historyServiceClient) BootstrapExecutionFeed(ctx context.Context, in *BootstrapExecutionFeedRequest, opts ...grpc.CallOption) (*BootstrapExecutionFeedResponse, error) {
+	out := new(BootstrapExecutionFeedResponse)
+	err := c.cc.Invoke(ctx, HistoryService_BootstrapExecutionFeed_FullMethodName, in, out, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *historyServiceClient) GetExecutionFeed(ctx context.Context, in *GetExecutionFeedRequest, opts ...grpc.CallOption) (*GetExecutionFeedResponse, error) {
+	out := new(GetExecutionFeedResponse)
+	err := c.cc.Invoke(ctx, HistoryService_GetExecutionFeed_FullMethodName, in, out, opts...)
 	if err != nil {
 		return nil, err
 	}
@@ -1264,6 +1288,10 @@ type HistoryServiceServer interface {
 	CloseShard(context.Context, *CloseShardRequest) (*CloseShardResponse, error)
 	// GetShard gets the ShardInfo
 	GetShard(context.Context, *GetShardRequest) (*GetShardResponse, error)
+	// BootstrapExecutionFeed commits one primary-enumeration page through the owning shard.
+	BootstrapExecutionFeed(context.Context, *BootstrapExecutionFeedRequest) (*BootstrapExecutionFeedResponse, error)
+	// GetExecutionFeed reads a namespace-filtered interval below the durable ingestion cutoff.
+	GetExecutionFeed(context.Context, *GetExecutionFeedRequest) (*GetExecutionFeedResponse, error)
 	// RemoveTask remove task based on type, taskid, shardid.
 	RemoveTask(context.Context, *RemoveTaskRequest) (*RemoveTaskResponse, error)
 	// GetReplicationMessages return replication messages based on the read level
@@ -1516,6 +1544,12 @@ func (UnimplementedHistoryServiceServer) CloseShard(context.Context, *CloseShard
 }
 func (UnimplementedHistoryServiceServer) GetShard(context.Context, *GetShardRequest) (*GetShardResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method GetShard not implemented")
+}
+func (UnimplementedHistoryServiceServer) BootstrapExecutionFeed(context.Context, *BootstrapExecutionFeedRequest) (*BootstrapExecutionFeedResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method BootstrapExecutionFeed not implemented")
+}
+func (UnimplementedHistoryServiceServer) GetExecutionFeed(context.Context, *GetExecutionFeedRequest) (*GetExecutionFeedResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method GetExecutionFeed not implemented")
 }
 func (UnimplementedHistoryServiceServer) RemoveTask(context.Context, *RemoveTaskRequest) (*RemoveTaskResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method RemoveTask not implemented")
@@ -2300,6 +2334,42 @@ func _HistoryService_GetShard_Handler(srv interface{}, ctx context.Context, dec 
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
 		return srv.(HistoryServiceServer).GetShard(ctx, req.(*GetShardRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _HistoryService_BootstrapExecutionFeed_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(BootstrapExecutionFeedRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(HistoryServiceServer).BootstrapExecutionFeed(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: HistoryService_BootstrapExecutionFeed_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(HistoryServiceServer).BootstrapExecutionFeed(ctx, req.(*BootstrapExecutionFeedRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _HistoryService_GetExecutionFeed_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GetExecutionFeedRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(HistoryServiceServer).GetExecutionFeed(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: HistoryService_GetExecutionFeed_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(HistoryServiceServer).GetExecutionFeed(ctx, req.(*GetExecutionFeedRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -3218,6 +3288,14 @@ var HistoryService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "GetShard",
 			Handler:    _HistoryService_GetShard_Handler,
+		},
+		{
+			MethodName: "BootstrapExecutionFeed",
+			Handler:    _HistoryService_BootstrapExecutionFeed_Handler,
+		},
+		{
+			MethodName: "GetExecutionFeed",
+			Handler:    _HistoryService_GetExecutionFeed_Handler,
 		},
 		{
 			MethodName: "RemoveTask",

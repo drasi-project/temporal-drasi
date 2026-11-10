@@ -843,6 +843,62 @@ message GetShardResponse {
   temporal.server.api.persistence.v1.ShardInfo shard_info = 1;
 }
 
+message BootstrapExecutionFeedRequest {
+  option (routing).shard_id = "shard_id";
+
+  // Namespace ID selects the local namespace whose baselines are captured.
+  string namespace_id = 1;
+  // Shard ID selects the owner of the primary execution partition.
+  int32 shard_id = 2;
+  // Page size bounds primary enumeration to between 1 and 100 keys.
+  int32 page_size = 3;
+  // Next page token resumes this source incarnation's primary enumeration.
+  bytes next_page_token = 4;
+  // Zero begins a fenced reconstruction. Subsequent pages retain the returned epoch.
+  int64 capture_epoch = 5;
+}
+
+message BootstrapExecutionFeedResponse {
+  // Next page token is empty only when primary enumeration has completed.
+  bytes next_page_token = 1;
+  // Cutoff is allocation-aware and follows this page's committed baselines.
+  // Bootstrap must wait for the durable published cutoff to cover the final page.
+  int64 bootstrap_cutoff = 2;
+  // Capture epoch identifies the namespace's durable shard capture session.
+  int64 capture_epoch = 3;
+  // Reconstruction starts here, excluding records predating the fresh primary scan.
+  // Only the first response supplies this position; persist it with that page.
+  int64 reconstruction_start = 4;
+}
+
+message GetExecutionFeedRequest {
+  option (routing).shard_id = "shard_id";
+
+  // Namespace ID filters records without changing the shard cursor.
+  string namespace_id = 1;
+  // Shard ID selects the authoritative journal partition.
+  int32 shard_id = 2;
+  // From position is the inclusive journal scan cursor.
+  int64 start_position = 3;
+  // Through position is an exclusive bound at or below the published cutoff.
+  int64 end_position = 4;
+  // Page size bounds the scan to between 1 and 100 journal entries.
+  int32 page_size = 5;
+  // Capture epoch must match the session established by bootstrap.
+  int64 capture_epoch = 6;
+}
+
+message GetExecutionFeedResponse {
+  // Records contain versioned FeedRecord JSON without execution payloads.
+  // The combined record bytes are bounded to 3 MiB.
+  repeated bytes records = 1;
+  // Next position advances only through scanned records, including other namespaces.
+  // Callers persist it only after durable downstream acceptance.
+  int64 next_position = 2;
+  // Published cutoff comes from the History-owned queue's durable ingestion state.
+  int64 published_cutoff = 3;
+}
+
 message RemoveTaskRequest {
   option (routing).shard_id = "shard_id";
 

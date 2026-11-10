@@ -28,6 +28,8 @@ func newTaskRequestTracker(registry tasks.TaskCategoryRegistry) *taskRequestTrac
 	for _, category := range registry.GetCategories() {
 		outstandingTaskKeys[category] = make(map[tasks.Key]struct{})
 	}
+	// Active capture sessions retain gap tasks even while ingestion is disabled.
+	outstandingTaskKeys[tasks.CategoryExecutionFeed] = make(map[tasks.Key]struct{})
 	return &taskRequestTracker{
 		pendingTaskKeys: outstandingTaskKeys,
 	}

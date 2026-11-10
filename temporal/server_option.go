@@ -20,6 +20,7 @@ import (
 	"go.temporal.io/server/common/rpc/encryption"
 	"go.temporal.io/server/common/searchattribute"
 	"go.temporal.io/server/common/testing/testhooks"
+	"go.temporal.io/server/service/watch"
 	"google.golang.org/grpc"
 )
 
@@ -194,6 +195,22 @@ func WithPersistenceFactoryProvider(persistenceFactoryProvider persistenceclient
 func WithSearchAttributesMapper(m searchattribute.Mapper) ServerOption {
 	return applyFunc(func(s *serverOptions) {
 		s.searchAttributesMapper = m
+	})
+}
+
+// WithDrasiPluginPolicy configures administrator-reviewed catalogs,
+// startup pins and managed descriptor pairs for the opt-in Watch role.
+func WithDrasiPluginPolicy(policy watch.PluginPolicy) ServerOption {
+	return applyFunc(func(s *serverOptions) {
+		s.drasiPluginPolicy = &policy
+	})
+}
+
+// WithDrasiCredentialReader installs an exact-version, namespace-authorizing
+// credential reader. No credentials are read when the Watch role is disabled.
+func WithDrasiCredentialReader(reader watch.CredentialReader) ServerOption {
+	return applyFunc(func(s *serverOptions) {
+		s.drasiCredentials = reader
 	})
 }
 

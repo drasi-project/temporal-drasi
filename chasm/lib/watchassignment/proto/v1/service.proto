@@ -1,0 +1,62 @@
+syntax = "proto3";
+
+package temporal.server.chasm.watchassignment.v1;
+
+import "chasm/lib/watchassignment/proto/v1/state.proto";
+import "temporal/server/api/common/v1/api_category.proto";
+import "temporal/server/api/routing/v1/extension.proto";
+
+option go_package = "go.temporal.io/server/chasm/lib/watchassignment/gen/assignmentpb/v1;assignmentpb";
+
+// AssignmentService is an internal History-routed cooperative owner registry.
+service AssignmentService {
+  rpc Begin(BeginRequest) returns (State) {
+    option (temporal.server.api.routing.v1.routing).business_id = "execution_id";
+    option (temporal.server.api.common.v1.api_category).category = API_CATEGORY_STANDARD;
+  }
+  rpc Describe(DescribeRequest) returns (State) {
+    option (temporal.server.api.routing.v1.routing).business_id = "execution_id";
+    option (temporal.server.api.common.v1.api_category).category = API_CATEGORY_STANDARD;
+  }
+  rpc Seal(SealRequest) returns (State) {
+    option (temporal.server.api.routing.v1.routing).business_id = "execution_id";
+    option (temporal.server.api.common.v1.api_category).category = API_CATEGORY_STANDARD;
+  }
+}
+
+message BeginRequest {
+  // Namespace ID selects the authoritative namespace.
+  string namespace_id = 1;
+  // Execution ID is the fixed namespace assignment business ID.
+  string execution_id = 2;
+  // Expected version is zero only for the first owner.
+  uint64 expected_version = 3;
+  // Storage host ID must remain unchanged after first admission.
+  string storage_host_id = 4;
+  // Process boot ID is generated once per hosting process.
+  string process_boot_id = 5;
+  // Request ID remains unchanged while resolving an ambiguous Begin response.
+  string request_id = 6;
+}
+
+message DescribeRequest {
+  // Namespace ID selects the authoritative namespace.
+  string namespace_id = 1;
+  // Execution ID is the fixed namespace assignment business ID.
+  string execution_id = 2;
+}
+
+message SealRequest {
+  // Namespace ID selects the authoritative namespace.
+  string namespace_id = 1;
+  // Execution ID is the fixed namespace assignment business ID.
+  string execution_id = 2;
+  // Expected version fences the currently active grant.
+  uint64 expected_version = 3;
+  // Grant must exactly match the owner that successfully closed its runtime.
+  Grant grant = 4;
+  // Checkpoint must be verified by the closing owner before this call.
+  Cut checkpoint = 5;
+  // Request ID remains unchanged while resolving an ambiguous Seal response.
+  string request_id = 6;
+}

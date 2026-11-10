@@ -59,6 +59,18 @@ type (
 	Service struct {
 		// RPC is the rpc configuration
 		RPC RPC `yaml:"rpc"`
+		// Drasi configures native storage for the opt-in Watch service.
+		Drasi Watch `yaml:"drasi"`
+	}
+
+	// Watch contains host-local native runtime configuration.
+	Watch struct {
+		// StateRoot is an existing absolute directory on persistent local storage.
+		StateRoot string `yaml:"stateRoot"`
+		// StorageHostID is a stable administrator-assigned UUID for that storage.
+		StorageHostID string `yaml:"storageHostID"`
+		// MaxNamespaces bounds simultaneous namespace hosts, including blocked closes.
+		MaxNamespaces int `yaml:"maxNamespaces"`
 	}
 
 	// PProf contains the config items for the pprof utility

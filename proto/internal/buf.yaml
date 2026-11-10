@@ -15,3 +15,7 @@ lint:
   except:
     - PACKAGE_SAME_JAVA_MULTIPLE_FILES
     - PACKAGE_SAME_JAVA_PACKAGE
+  ignore_only:
+    # Watch capability discovery shares the public contract response.
+    RPC_RESPONSE_STANDARD_NAME:
+      - temporal/server/api/watchservice/v1/service.proto

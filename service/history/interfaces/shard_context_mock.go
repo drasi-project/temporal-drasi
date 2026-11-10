@@ -44,6 +44,59 @@ import (
 	gomock "go.uber.org/mock/gomock"
 )
 
+// MockExecutionFeedCapture is a mock of ExecutionFeedCapture interface.
+type MockExecutionFeedCapture struct {
+	ctrl     *gomock.Controller
+	recorder *MockExecutionFeedCaptureMockRecorder
+	isgomock struct{}
+}
+
+// MockExecutionFeedCaptureMockRecorder is the mock recorder for MockExecutionFeedCapture.
+type MockExecutionFeedCaptureMockRecorder struct {
+	mock *MockExecutionFeedCapture
+}
+
+// NewMockExecutionFeedCapture creates a new mock instance.
+func NewMockExecutionFeedCapture(ctrl *gomock.Controller) *MockExecutionFeedCapture {
+	mock := &MockExecutionFeedCapture{ctrl: ctrl}
+	mock.recorder = &MockExecutionFeedCaptureMockRecorder{mock}
+	return mock
+}
+
+// EXPECT returns an object that allows the caller to indicate expected use.
+func (m *MockExecutionFeedCapture) EXPECT() *MockExecutionFeedCaptureMockRecorder {
+	return m.recorder
+}
+
+// BeginExecutionFeedCapture mocks base method.
+func (m *MockExecutionFeedCapture) BeginExecutionFeedCapture(arg0 context.Context, arg1 namespace.ID) (*ExecutionFeedCaptureScope, error) {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "BeginExecutionFeedCapture", arg0, arg1)
+	ret0, _ := ret[0].(*ExecutionFeedCaptureScope)
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
+}
+
+// BeginExecutionFeedCapture indicates an expected call of BeginExecutionFeedCapture.
+func (mr *MockExecutionFeedCaptureMockRecorder) BeginExecutionFeedCapture(arg0, arg1 any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "BeginExecutionFeedCapture", reflect.TypeOf((*MockExecutionFeedCapture)(nil).BeginExecutionFeedCapture), arg0, arg1)
+}
+
+// ExecutionFeedCaptureEpoch mocks base method.
+func (m *MockExecutionFeedCapture) ExecutionFeedCaptureEpoch(arg0 namespace.ID) int64 {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "ExecutionFeedCaptureEpoch", arg0)
+	ret0, _ := ret[0].(int64)
+	return ret0
+}
+
+// ExecutionFeedCaptureEpoch indicates an expected call of ExecutionFeedCaptureEpoch.
+func (mr *MockExecutionFeedCaptureMockRecorder) ExecutionFeedCaptureEpoch(arg0 any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "ExecutionFeedCaptureEpoch", reflect.TypeOf((*MockExecutionFeedCapture)(nil).ExecutionFeedCaptureEpoch), arg0)
+}
+
 // MockShardContext is a mock of ShardContext interface.
 type MockShardContext struct {
 	ctrl     *gomock.Controller

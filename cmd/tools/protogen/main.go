@@ -1,11 +1,17 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"flag"
 	"fmt"
+	"go/ast"
+	"go/format"
+	"go/parser"
+	"go/token"
 	"log"
+	"maps"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -13,6 +19,8 @@ import (
 	"strings"
 
 	"github.com/fatih/color"
+	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/types/descriptorpb"
 )
 
 var cyan = color.New(color.FgHiCyan, color.Bold)
@@ -120,6 +128,7 @@ type generator struct {
 	protocGenGoHelpersBin string
 	protocGenGoChasmBin   string
 	chasmLibDirs          []string
+	chasmPackages         map[string]string
 }
 
 func newGenerator() (*generator, error) {
@@ -162,7 +171,47 @@ func newGenerator() (*generator, error) {
 	gen.tempOut = gen.protoOut + ".new"
 	gen.tempProtoRoot = gen.protoRoot + ".tmp"
 	gen.protoBackup = gen.protoOut + ".old"
+	descriptors, err := os.ReadFile(filepath.Join(gen.protoRoot, "chasm.bin"))
+	if err != nil {
+		return nil, fmt.Errorf("read CHASM descriptors: %w", err)
+	}
+	gen.chasmPackages, err = chasmOutputPackages(descriptors)
+	if err != nil {
+		return nil, err
+	}
 	return &gen, nil
+}
+
+func chasmOutputPackages(encoded []byte) (map[string]string, error) {
+	var descriptors descriptorpb.FileDescriptorSet
+	if err := proto.Unmarshal(encoded, &descriptors); err != nil {
+		return nil, fmt.Errorf("decode CHASM descriptors: %w", err)
+	}
+	packages := make(map[string]string)
+	for _, file := range descriptors.File {
+		if !strings.HasPrefix(file.GetName(), "chasm/lib/") {
+			continue
+		}
+		option, _, _ := strings.Cut(file.GetOptions().GetGoPackage(), ";")
+		if !strings.HasPrefix(option, "go.temporal.io/server/chasm/lib/") {
+			return nil, fmt.Errorf("CHASM proto %s requires a server-local go_package", file.GetName())
+		}
+		output := strings.TrimPrefix(option, "go.temporal.io/server/")
+		if filepath.Clean(output) != output || strings.Contains(output, "..") {
+			return nil, fmt.Errorf("CHASM proto %s has an invalid go_package path", file.GetName())
+		}
+		directory := filepath.Dir(file.GetName())
+		// CHASM output retains the source version even when go_package omits it.
+		version := filepath.Base(directory)
+		if filepath.Base(output) != version {
+			output = filepath.Join(output, version)
+		}
+		if previous, ok := packages[directory]; ok && previous != output {
+			return nil, fmt.Errorf("CHASM proto directory %s declares inconsistent go_package paths", directory)
+		}
+		packages[directory] = output
+	}
+	return packages, nil
 }
 
 func (g *generator) removeExistingGenDirs() error {
@@ -253,6 +302,93 @@ func (g *generator) runGoImports(ctx context.Context) error {
 		return fmt.Errorf("error running goimports: %w", err)
 	}
 	return nil
+}
+
+// rewriteChasmEnumDefaults completes enum rewriting across files in one package.
+// The API generator rewrites declarations and references only within each file.
+func rewriteChasmEnumDefaults(root string) error {
+	files := make(map[string]*ast.File)
+	aliases := make(map[string]map[string]string)
+	fset := token.NewFileSet()
+	err := filepath.WalkDir(root, func(path string, entry os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if entry.IsDir() || !strings.HasSuffix(path, ".pb.go") {
+			return nil
+		}
+		file, err := parser.ParseFile(fset, path, nil, parser.ParseComments)
+		if err != nil {
+			return err
+		}
+		files[path] = file
+		directory := filepath.Dir(path)
+		if _, ok := aliases[directory]; !ok {
+			aliases[directory] = make(map[string]string)
+		}
+		maps.Copy(aliases[directory], enumAliases(file))
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+	for path, file := range files {
+		if !rewriteEnumDefaultReturns(file, aliases[filepath.Dir(path)]) {
+			continue
+		}
+		var output bytes.Buffer
+		if err := format.Node(&output, fset, file); err != nil {
+			return err
+		}
+		if err := os.WriteFile(path, output.Bytes(), 0644); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func rewriteEnumDefaultReturns(file *ast.File, aliases map[string]string) bool {
+	changed := false
+	ast.Inspect(file, func(node ast.Node) bool {
+		result, ok := node.(*ast.ReturnStmt)
+		if !ok {
+			return true
+		}
+		for _, value := range result.Results {
+			name, ok := value.(*ast.Ident)
+			if !ok {
+				continue
+			}
+			if replacement, ok := aliases[name.Name]; ok {
+				name.Name, changed = replacement, true
+			}
+		}
+		return true
+	})
+	return changed
+}
+
+func enumAliases(file *ast.File) map[string]string {
+	aliases := make(map[string]string)
+	for _, declaration := range file.Decls {
+		group, ok := declaration.(*ast.GenDecl)
+		if !ok || group.Tok != token.CONST {
+			continue
+		}
+		for _, declaration := range group.Specs {
+			value, ok := declaration.(*ast.ValueSpec)
+			if !ok {
+				continue
+			}
+			kind, ok := value.Type.(*ast.Ident)
+			if !ok || len(value.Names) != 1 || strings.HasPrefix(value.Names[0].Name, kind.Name+"_") {
+				continue
+			}
+			name := value.Names[0].Name
+			aliases[kind.Name+"_"+name] = name
+		}
+	}
+	return aliases
 }
 
 func (g *generator) generateProtoMocks(ctx context.Context) error {
@@ -362,14 +498,17 @@ func (g *generator) moveGeneratedChasmFiles() error {
 		if err != nil {
 			return err
 		}
-		// Transform relPath to match the destination structure
-		// e.g., "lib/<name>/proto/v1/*" -> "lib/<name>/gen/<name>pb/*"
 		re := regexp.MustCompile(`^lib/([^/]+)/proto/(v\d+)/(.*)$`)
 		parts := re.FindStringSubmatch(relPath)
 		if len(parts) < 4 {
 			return nil
 		}
-		dstPath := filepath.Join("chasm", "lib", parts[1], "gen", parts[1]+"pb", parts[2], parts[3])
+		source := filepath.Join("chasm", "lib", parts[1], "proto", parts[2])
+		output, ok := g.chasmPackages[source]
+		if !ok {
+			return fmt.Errorf("generated CHASM directory %s has no declared go_package", source)
+		}
+		dstPath := filepath.Join(output, parts[3])
 		dirName := filepath.Dir(dstPath) // Ensure the destination path is a base path
 
 		if err := os.MkdirAll(dirName, 0755); err != nil {
@@ -415,11 +554,6 @@ func main() {
 		log.Fatalln("Error creating generator:", err)
 	}
 
-	info("Removing existing CHASM gen directories...")
-	if err := gen.removeExistingGenDirs(); err != nil {
-		log.Fatalln("Error removing existing CHASM gen directories:", err)
-	}
-
 	info("Backing up existing proto output directory...")
 	if err := gen.backupProtos(); err != nil {
 		log.Fatalln("Error backing up proto output directory:", err)
@@ -449,6 +583,9 @@ func generate(ctx context.Context, gen *generator) error {
 	if err := gen.runProtogen(ctx); err != nil {
 		return fmt.Errorf("error running protogen: %w", err)
 	}
+	if err := rewriteChasmEnumDefaults(filepath.Join(gen.tempOut, "temporal", "server", "chasm")); err != nil {
+		return fmt.Errorf("error rewriting CHASM enum defaults: %w", err)
+	}
 	info("Running goimports for proto files...")
 	if err := gen.runGoImports(ctx); err != nil {
 		return fmt.Errorf("error running goimports: %w", err)
@@ -464,6 +601,10 @@ func generate(ctx context.Context, gen *generator) error {
 	info("Modifying matching service server interface...")
 	if err := gen.modifyMatchingServiceFile(); err != nil {
 		return fmt.Errorf("error modifying matching service file: %w", err)
+	}
+	info("Removing existing CHASM gen directories...")
+	if err := gen.removeExistingGenDirs(); err != nil {
+		return fmt.Errorf("error removing existing CHASM gen directories: %w", err)
 	}
 	info("Moving proto files into place...")
 	if err := gen.moveProtoFiles(); err != nil {

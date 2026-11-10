@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	contractpb "github.com/drasi-project/temporal-drasi/contracts/watch/v1"
 	"github.com/gorilla/mux"
 	"github.com/grpc-ecosystem/grpc-gateway/v2/runtime"
 	"go.temporal.io/api/operatorservice/v1"
@@ -78,6 +79,8 @@ func NewHTTPAPIServer(
 	router *mux.Router,
 	namespaceRegistry namespace.Registry,
 	logger log.Logger,
+	watches contractpb.WatchServiceServer,
+	plugins contractpb.PluginServiceServer,
 ) (*HTTPAPIServer, error) {
 	// Create a TCP listener the same as the frontend one but with different port
 	tcpAddrRef, _ := grpcListener.Addr().(*net.TCPAddr)
@@ -147,6 +150,8 @@ func NewHTTPAPIServer(
 		map[string]any{
 			"temporal.api.workflowservice.v1.WorkflowService": handler,
 			"temporal.api.operatorservice.v1.OperatorService": operatorHandler,
+			"drasi.watch.v1.WatchService":                     watches,
+			"drasi.watch.v1.PluginService":                    plugins,
 		},
 		interceptors,
 		metricsHandler,
@@ -172,6 +177,16 @@ func NewHTTPAPIServer(
 	)
 	if err != nil {
 		return nil, fmt.Errorf("failed registering operatorservice HTTP API handler: %w", err)
+	}
+	if err := contractpb.RegisterWatchServiceHandlerClient(
+		context.Background(), h.serveMux, contractpb.NewWatchServiceClient(clientConn),
+	); err != nil {
+		return nil, fmt.Errorf("failed registering WatchService HTTP API handler: %w", err)
+	}
+	if err := contractpb.RegisterPluginServiceHandlerClient(
+		context.Background(), h.serveMux, contractpb.NewPluginServiceClient(clientConn),
+	); err != nil {
+		return nil, fmt.Errorf("failed registering PluginService HTTP API handler: %w", err)
 	}
 
 	// Set the / handler as our function that wraps serve mux.

@@ -12,6 +12,7 @@ var (
 		"History":     2,
 		"Matching":    3,
 		"Worker":      4,
+		"Watch":       6,
 	}
 )
 

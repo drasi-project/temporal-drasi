@@ -1,0 +1,132 @@
+syntax = "proto3";
+
+package temporal.server.chasm.watchregistry.v1;
+
+import "drasi/watch/v1/service.proto";
+
+option go_package = "go.temporal.io/server/chasm/lib/watchregistry/gen/registrypb/v1;registrypb";
+
+// DesiredState is control-plane intent, never an observation of runtime readiness.
+enum DesiredState {
+  DESIRED_STATE_UNSPECIFIED = 0;
+  DESIRED_STATE_STOPPED = 1;
+  DESIRED_STATE_RUNNING = 2;
+  DESIRED_STATE_PAUSED = 3;
+  DESIRED_STATE_DELETED = 4;
+  DESIRED_STATE_CANCELED = 5;
+}
+
+enum ResourceKind {
+  RESOURCE_KIND_UNSPECIFIED = 0;
+  RESOURCE_KIND_SOURCE = 1;
+  RESOURCE_KIND_QUERY = 2;
+  RESOURCE_KIND_WATCH = 3;
+}
+
+// Record retains an authoritative definition separately from desired control state.
+message Record {
+  oneof resource {
+    // Source is an immutable public source revision with no observed status.
+    drasi.watch.v1.Source source = 1;
+    // Query is an immutable public query revision with no observed status.
+    drasi.watch.v1.Query query = 2;
+    // Watch is an immutable public watch revision with no observed status.
+    drasi.watch.v1.Watch watch = 3;
+  }
+  // Desired selects reconciliation without claiming effects were retracted.
+  DesiredState desired = 4;
+  // Incarnation identifies a definition lifetime across lifecycle-only revisions.
+  // It changes on creation, replacement, and an explicit Watch reset.
+  string incarnation = 5;
+}
+
+message MutationResult {
+  // Record is the original accepted result, including its original revision.
+  Record record = 1;
+  // Rejection preserves an original semantic rejection across retries.
+  Rejection rejection = 2;
+  // Retry execution ID pins an authorized delivery command to its original control.
+  string retry_execution_id = 3;
+}
+
+// RejectionCode uses the corresponding gRPC status code numbers.
+enum RejectionCode {
+  REJECTION_CODE_UNSPECIFIED = 0;
+  REJECTION_CODE_INVALID_ARGUMENT = 3;
+  REJECTION_CODE_NOT_FOUND = 5;
+  REJECTION_CODE_ALREADY_EXISTS = 6;
+  REJECTION_CODE_RESOURCE_EXHAUSTED = 8;
+  REJECTION_CODE_FAILED_PRECONDITION = 9;
+}
+
+message Rejection {
+  // Code preserves the original semantic error category.
+  RejectionCode code = 1;
+  // Message is a static diagnostic and never contains source configuration.
+  string message = 2;
+}
+
+message Receipt {
+  // Fingerprint hashes the deterministic typed request, including the method oneof.
+  bytes fingerprint = 1;
+  // Result is never recomputed from the current resource on retry.
+  MutationResult result = 2;
+}
+
+message Limits {
+  // ResourceIds bounds all distinct kind/ID pairs, including deleted tombstones.
+  uint32 resource_ids = 1;
+  // Mutations bounds permanent request identities and retained revisions.
+  uint32 mutations = 2;
+  // StateBytes bounds serialized registry state, including receipts and revisions.
+  uint32 state_bytes = 3;
+  // RequestBytes bounds each public mutation and read request.
+  uint32 request_bytes = 4;
+  // PageBytes bounds each serialized read response.
+  uint32 page_bytes = 5;
+}
+
+message State {
+  // Namespace is the authoritative namespace name at registry creation.
+  string namespace = 1;
+  // Generation changes on successful mutations and fences pagination.
+  uint64 generation = 2;
+  // Current retains the latest record and revision high-water tombstone per kind/ID.
+  map<string, Record> current = 3;
+  // Revisions retains immutable definitions needed by pinned dependencies.
+  map<string, Record> revisions = 4;
+  // Receipts never evicts accepted request identities or semantic rejections.
+  map<string, Receipt> receipts = 5;
+  // Limits is fixed at creation so failover cannot weaken retention guarantees.
+  Limits limits = 6;
+}
+
+message PageCursor {
+  // Namespace scopes the token to one registry.
+  string namespace = 1;
+  // Generation rejects continuation after a concurrent mutation.
+  uint64 generation = 2;
+  // Kind prevents moving a token between resource lists.
+  ResourceKind kind = 3;
+  // After is the last returned resource ID.
+  string after = 4;
+  // Filter fingerprints the owner filter without the page token or page size.
+  bytes filter = 5;
+}
+
+message DeliveryCursor {
+  // NamespaceId binds the token to the authoritative namespace UUID.
+  string namespace_id = 1;
+  // WatchId binds the token to one public Watch identifier.
+  string watch_id = 2;
+  // Generation refuses continuation after a registry mutation.
+  uint64 generation = 3;
+  // LifetimeRevision identifies the current or last completed lifetime.
+  uint64 lifetime_revision = 4;
+  // WithinLifetime continues after the output position instead of the lifetime.
+  bool within_lifetime = 5;
+  // Sequence is the last returned immutable query output sequence.
+  uint64 sequence = 6;
+  // Ordinal is the last returned row ordinal within that output.
+  uint32 ordinal = 7;
+}

@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	contractpb "github.com/drasi-project/temporal-drasi/contracts/watch/v1"
 	"github.com/google/uuid"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.temporal.io/api/operatorservice/v1"
@@ -20,6 +21,9 @@ import (
 	"go.temporal.io/server/api/matchingservice/v1"
 	persistencespb "go.temporal.io/server/api/persistence/v1"
 	schedulerpb "go.temporal.io/server/chasm/lib/scheduler/gen/schedulerpb/v1"
+	watchpb "go.temporal.io/server/chasm/lib/watch/gen/watchpb/v1"
+	assignmentpb "go.temporal.io/server/chasm/lib/watchassignment/gen/assignmentpb/v1"
+	registrypb "go.temporal.io/server/chasm/lib/watchregistry/gen/registrypb/v1"
 	"go.temporal.io/server/common/cluster"
 	"go.temporal.io/server/common/config"
 	"go.temporal.io/server/common/dynamicconfig"
@@ -424,6 +428,22 @@ func (tc *TestCluster) MatchingClient() matchingservice.MatchingServiceClient {
 // SchedulerClient returns a scheduler client from the test cluster
 func (tc *TestCluster) SchedulerClient() schedulerpb.SchedulerServiceClient {
 	return tc.host.SchedulerClient()
+}
+
+func (tc *TestCluster) WatchControlClient() watchpb.ControlServiceClient {
+	return tc.host.WatchControlClient()
+}
+
+func (tc *TestCluster) WatchRegistryClient() registrypb.RegistryServiceClient {
+	return tc.host.WatchRegistryClient()
+}
+
+func (tc *TestCluster) WatchAssignmentClient() assignmentpb.AssignmentServiceClient {
+	return tc.host.WatchAssignmentClient()
+}
+
+func (tc *TestCluster) DrasiClient() contractpb.WatchServiceClient {
+	return tc.host.DrasiClient()
 }
 
 // ExecutionManager returns an execution manager factory from the test cluster

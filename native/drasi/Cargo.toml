@@ -1,0 +1,58 @@
+[package]
+name = "temporal-drasi"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[workspace]
+members = ["tests/plugin-fixture", "tests/other-plugin-fixture", "plugins/postgres"]
+default-members = ["."]
+exclude = [
+    ".upstream/drasi-core-9469f3e01ff22c4f0092c9900dfbd5051ceae545",
+    ".upstream/drasi-core-e617146537075c71fc89445aa44ba657add55d26",
+    ".upstream/drasi-core-029e8390bfc0a6e426ace96012593e743b068f65",
+    ".upstream/drasi-core-198a2fbe0e9eb5f819d4ac5cce5622252d6ffe72",
+    ".upstream/drasi-core-7bf4530999d24a435db70a6ac6e07c27b26253ac",
+]
+
+[lib]
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[dependencies]
+drasi-lib = "=0.9.3"
+drasi-core = "=0.5.10"
+drasi-query-cypher = "=0.3.6"
+drasi-query-gql = "=0.3.6"
+drasi-functions-cypher = "=0.5.10"
+drasi-functions-gql = "=0.5.10"
+drasi-host-sdk = { version = "=0.11.3", features = ["registry"] }
+drasi-plugin-sdk = "=0.11.3"
+drasi-state-store-redb = "=0.2.8"
+drasi-wal-redb = "=0.2.10"
+drasi-index-rocksdb = "=0.6.4"
+tokio = { version = "1", features = ["rt-multi-thread", "sync", "time"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+async-trait = "0.1"
+uuid = { version = "1", features = ["v4", "serde"] }
+sha2 = "0.10"
+anyhow = "1"
+bytes = "1"
+chrono = "0.4"
+fs2 = "0.4"
+libloading = "0.8"
+futures-util = "0.3"
+
+[dev-dependencies]
+temporal-drasi-test-plugin = { path = "tests/plugin-fixture" }
+temporal-drasi-other-test-plugin = { path = "tests/other-plugin-fixture" }
+
+[build-dependencies]
+sha2 = "0.10"
+
+[profile.dev]
+debug = 0
+strip = "none"
+
+[profile.release]
+strip = "none"

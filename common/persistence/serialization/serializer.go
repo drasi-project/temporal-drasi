@@ -1,6 +1,7 @@
 package serialization
 
 import (
+	"encoding/json"
 	"fmt"
 	"strings"
 
@@ -163,6 +164,13 @@ func (t *serializerImpl) SerializeTask(
 		return serializeArchivalTask(t, task)
 	case tasks.CategoryIDOutbound:
 		return serializeOutboundTask(t, task)
+	case tasks.CategoryIDExecutionFeed, tasks.CategoryIDExecutionFeedJournal:
+		feed, ok := task.(*tasks.ExecutionFeedTask)
+		if !ok || !feed.ValidSchema() {
+			return nil, serviceerror.NewInvalidArgument("unsupported execution feed task")
+		}
+		data, err := json.Marshal(feed)
+		return &commonpb.DataBlob{EncodingType: enumspb.ENCODING_TYPE_JSON, Data: data}, err
 	default:
 		return nil, serviceerror.NewInternalf("Unknown task category: %v", category)
 	}
@@ -185,6 +193,19 @@ func (t *serializerImpl) DeserializeTask(
 		return deserializeArchivalTask(t, blob)
 	case tasks.CategoryIDOutbound:
 		return deserializeOutboundTask(t, blob)
+	case tasks.CategoryIDExecutionFeed, tasks.CategoryIDExecutionFeedJournal:
+		if blob.GetEncodingType() != enumspb.ENCODING_TYPE_JSON {
+			return nil, serviceerror.NewInvalidArgument("unsupported execution feed encoding")
+		}
+		var feed tasks.ExecutionFeedTask
+		if err := json.Unmarshal(blob.GetData(), &feed); err != nil {
+			return nil, serviceerror.NewDataLoss("invalid execution feed task")
+		}
+		if !feed.ValidSchema() {
+			return nil, serviceerror.NewFailedPrecondition("unsupported execution feed schema version")
+		}
+		feed.Journal = category.ID() == tasks.CategoryIDExecutionFeedJournal
+		return &feed, nil
 	default:
 		return nil, serviceerror.NewInternalf("Unknown task category: %v", category)
 	}

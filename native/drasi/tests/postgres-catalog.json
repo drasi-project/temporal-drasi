@@ -1,0 +1,28 @@
+{
+  "catalogs": [
+    {
+      "id": "upstream-postgres",
+      "display_name": "Public Drasi PostgreSQL verification releases",
+      "plugins": [
+        {
+          "version": "0.2.12",
+          "artifact": {
+            "id": "upstream-postgres-source",
+            "reference": "ghcr.io/drasi-project/source/postgres@sha256:3d93b4cd9b3b93aacc11ed058556bfe65bcc6f0b85ab4e2c9f45f638fa040f91",
+            "binary_sha256": "59533cf0943f802a5df9cbafe77e9abe9c62689540cb0aa950364a047aae71b1",
+            "filename": "libdrasi_source_postgres.dylib"
+          }
+        },
+        {
+          "version": "0.2.15",
+          "artifact": {
+            "id": "upstream-postgres-bootstrap",
+            "reference": "ghcr.io/drasi-project/bootstrap/postgres@sha256:cada1c5fcd6bde4bce9817747585d01fc79153edda8ac24810360f2f1f00a35a",
+            "binary_sha256": "d2dd43dea49f1e8004b839cf806e5bced3b84c1e44bc2a6504833d4aac9a5b62",
+            "filename": "libdrasi_bootstrap_postgres.dylib"
+          }
+        }
+      ]
+    }
+  ]
+}

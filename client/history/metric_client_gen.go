@@ -23,6 +23,20 @@ func (c *metricClient) AddTasks(
 	return c.client.AddTasks(ctx, request, opts...)
 }
 
+func (c *metricClient) BootstrapExecutionFeed(
+	ctx context.Context,
+	request *historyservice.BootstrapExecutionFeedRequest,
+	opts ...grpc.CallOption,
+) (_ *historyservice.BootstrapExecutionFeedResponse, retError error) {
+
+	metricsHandler, startTime := c.startMetricsRecording(ctx, "HistoryClientBootstrapExecutionFeed")
+	defer func() {
+		c.finishMetricsRecording(metricsHandler, startTime, retError)
+	}()
+
+	return c.client.BootstrapExecutionFeed(ctx, request, opts...)
+}
+
 func (c *metricClient) CloseShard(
 	ctx context.Context,
 	request *historyservice.CloseShardRequest,
@@ -259,6 +273,20 @@ func (c *metricClient) GetDLQTasks(
 	}()
 
 	return c.client.GetDLQTasks(ctx, request, opts...)
+}
+
+func (c *metricClient) GetExecutionFeed(
+	ctx context.Context,
+	request *historyservice.GetExecutionFeedRequest,
+	opts ...grpc.CallOption,
+) (_ *historyservice.GetExecutionFeedResponse, retError error) {
+
+	metricsHandler, startTime := c.startMetricsRecording(ctx, "HistoryClientGetExecutionFeed")
+	defer func() {
+		c.finishMetricsRecording(metricsHandler, startTime, retError)
+	}()
+
+	return c.client.GetExecutionFeed(ctx, request, opts...)
 }
 
 func (c *metricClient) GetMutableState(

@@ -17,6 +17,7 @@ import (
 	persistencespb "go.temporal.io/server/api/persistence/v1"
 	"go.temporal.io/server/common/archiver"
 	"go.temporal.io/server/common/config"
+	"go.temporal.io/server/common/dynamicconfig"
 	"go.temporal.io/server/common/headers"
 	"go.temporal.io/server/common/log"
 	"go.temporal.io/server/common/persistence"
@@ -24,10 +25,30 @@ import (
 	"go.temporal.io/server/common/resource"
 	"go.temporal.io/server/common/telemetry"
 	"go.temporal.io/server/service/history/tasks"
+	"go.temporal.io/server/service/watch/native"
 	"go.temporal.io/server/tests/testutils"
 	"go.uber.org/fx"
 	"go.uber.org/mock/gomock"
 )
+
+func TestWatchServiceIsOptIn(t *testing.T) {
+	t.Parallel()
+	require.Contains(t, Services, string(primitives.WatchService))
+	require.NotContains(t, DefaultServices, string(primitives.WatchService))
+	params := ServiceProviderParamsCommon{
+		Logger:       log.NewNoopLogger(),
+		ServiceNames: resource.ServiceNames{primitives.HistoryService: {}},
+	}
+	output, err := WatchServiceProvider(params, newServerOptions(nil))
+	require.NoError(t, err)
+	require.Nil(t, output.Services)
+	if !native.Enabled() {
+		params.ServiceNames = resource.ServiceNames{primitives.WatchService: {}}
+		output, err = WatchServiceProvider(params, newServerOptions(nil))
+		require.Nil(t, output.Services)
+		require.ErrorIs(t, err, native.ErrDisabled)
+	}
+}
 
 func TestInitCurrentClusterMetadataRecord(t *testing.T) {
 	configDir := path.Join(testutils.GetRepoRootDirectory(), "config")
@@ -395,6 +416,7 @@ func TestTaskCategoryRegistryProvider(t *testing.T) {
 		historyState           archiver.ArchivalState
 		visibilityState        archiver.ArchivalState
 		expectArchivalCategory bool
+		enableExecutionFeed    bool
 	}{
 		{
 			name:                   "both disabled",
@@ -426,6 +448,12 @@ func TestTaskCategoryRegistryProvider(t *testing.T) {
 			visibilityState:        archiver.ArchivalDisabled,
 			expectArchivalCategory: false,
 		},
+		{
+			name:                "execution feed enabled",
+			historyState:        archiver.ArchivalDisabled,
+			visibilityState:     archiver.ArchivalDisabled,
+			enableExecutionFeed: true,
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			ctrl := gomock.NewController(t)
@@ -436,13 +464,20 @@ func TestTaskCategoryRegistryProvider(t *testing.T) {
 			visibilityArchivalConfig := archiver.NewMockArchivalConfig(ctrl)
 			visibilityArchivalConfig.EXPECT().StaticClusterState().Return(tc.visibilityState).AnyTimes()
 			archivalMetadata.EXPECT().GetVisibilityConfig().Return(visibilityArchivalConfig).AnyTimes()
-			registry := TaskCategoryRegistryProvider(archivalMetadata)
+			client := dynamicconfig.NewMemoryClient()
+			t.Cleanup(client.OverrideValue(dynamicconfig.EnableExecutionFeedQueue.Key(), tc.enableExecutionFeed))
+			dc := dynamicconfig.NewCollection(client, log.NewNoopLogger())
+			registry := TaskCategoryRegistryProvider(archivalMetadata, dc)
 			_, ok := registry.GetCategoryByID(tasks.CategoryIDArchival)
 			if tc.expectArchivalCategory {
 				require.True(t, ok)
 			} else {
 				require.False(t, ok)
 			}
+			_, ok = registry.GetCategoryByID(tasks.CategoryIDExecutionFeed)
+			require.Equal(t, tc.enableExecutionFeed, ok)
+			_, ok = registry.GetCategoryByID(tasks.CategoryIDExecutionFeedJournal)
+			require.False(t, ok)
 		})
 	}
 }

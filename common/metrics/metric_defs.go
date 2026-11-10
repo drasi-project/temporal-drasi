@@ -198,6 +198,12 @@ const (
 	PersistenceGetArchivalTasksScope = "GetArchivalTasks"
 	// PersistenceGetOutboundTasksScope tracks GetOutboundTasks calls made by service to persistence layer
 	PersistenceGetOutboundTasksScope = "GetOutboundTasks"
+	// PersistenceGetExecutionFeedTasksScope tracks committed feed queue reads.
+	PersistenceGetExecutionFeedTasksScope = "GetExecutionFeedTasks"
+	// PersistenceGetExecutionFeedJournalTasksScope tracks retained feed journal reads.
+	PersistenceGetExecutionFeedJournalTasksScope = "GetExecutionFeedJournalTasks"
+	// PersistenceCompleteExecutionFeedTaskScope tracks acknowledged feed queue entries.
+	PersistenceCompleteExecutionFeedTaskScope = "CompleteExecutionFeedTask"
 	// PersistenceCompleteOutboundTasksScope tracks CompleteOutboundTasks calls made by service to persistence layer
 	PersistenceCompleteOutboundTasksScope = "CompleteOutboundTasks"
 	// PersistenceRangeCompleteOutboundTasksScope tracks RangeCompleteOutboundTasks calls made by service to persistence layer

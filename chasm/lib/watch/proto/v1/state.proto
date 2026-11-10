@@ -1,0 +1,156 @@
+syntax = "proto3";
+
+package temporal.server.chasm.watch.v1;
+
+import "drasi/watch/v1/service.proto";
+import "google/protobuf/timestamp.proto";
+
+option go_package = "go.temporal.io/server/chasm/lib/watch/gen/watchpb/v1;watchpb";
+
+enum Status {
+  STATUS_UNSPECIFIED = 0;
+  STATUS_RUNNING = 1;
+  STATUS_PAUSED = 2;
+  STATUS_SATISFIED = 3;
+  STATUS_CANCELLED = 4;
+  STATUS_TIMED_OUT = 5;
+}
+
+enum ActionKind {
+  ACTION_KIND_UNSPECIFIED = 0;
+  ACTION_KIND_START = 1;
+  ACTION_KIND_SIGNAL = 2;
+  ACTION_KIND_SIGNAL_WITH_START = 3;
+}
+
+enum DeliveryStatus {
+  DELIVERY_STATUS_UNSPECIFIED = 0;
+  DELIVERY_STATUS_PENDING = 1;
+  DELIVERY_STATUS_DELIVERED = 2;
+  DELIVERY_STATUS_FAILED = 3;
+  DELIVERY_STATUS_AMBIGUOUS = 4;
+}
+
+enum ProgressPhase {
+  PROGRESS_PHASE_WAITING_FOR_SNAPSHOT = 0;
+  PROGRESS_PHASE_SNAPSHOTTING = 1;
+  PROGRESS_PHASE_LIVE = 2;
+}
+
+message Cursor {
+  // Sequence identifies the query output, not the source event.
+  uint64 sequence = 1;
+  // Next ordinal permits bounded acceptance of a single large query output.
+  uint64 next_ordinal = 2;
+  // Complete marks the last accepted chunk of this output.
+  bool complete = 3;
+}
+
+message State {
+  // Namespace is the namespace name used for target workflow RPCs.
+  string namespace = 1;
+  // Watch ID is the caller-visible resource identifier.
+  string watch_id = 2;
+  // Revision fences acceptance and lifecycle changes using the current control state.
+  uint64 revision = 3;
+  // Owner epoch fences obsolete runtime assignments.
+  uint64 owner_epoch = 4;
+  // Incarnation changes only when query output continuity is explicitly reset.
+  string incarnation = 5;
+  // Definition is the serialized versioned public Watch resource.
+  bytes definition = 6;
+  // Status records lifecycle without pausing already accepted deliveries.
+  Status status = 7;
+  // Cursor advances atomically with the corresponding delivery intents.
+  Cursor cursor = 8;
+  // Pending IDs preserve delivery order and bound outstanding work.
+  repeated string pending_ids = 9;
+  // Recent IDs bound retained terminal delivery details.
+  repeated string recent_ids = 10;
+  // Maximum pending limits action intents in this component.
+  uint32 max_pending = 11;
+  // Maximum batch limits actions accepted in one transaction.
+  uint32 max_batch = 12;
+  // Maximum recent limits retained terminal delivery details.
+  uint32 max_recent = 13;
+  // Once closes acceptance after the first satisfying match.
+  bool once = 14;
+  // Deadline is the one-shot deadline in Unix nanoseconds, or zero.
+  int64 deadline_unix_nano = 15;
+  // Delivered counts successfully dispatched actions.
+  uint64 delivered = 16;
+  // Failed counts terminally failed actions.
+  uint64 failed = 17;
+  // Pending bytes bounds serialized requests and output identities awaiting dispatch.
+  uint64 pending_bytes = 18;
+  // Maximum pending bytes bounds the durable action buffer.
+  uint64 max_pending_bytes = 19;
+  // Progress phase distinguishes the initial native snapshot from live output.
+  ProgressPhase progress_phase = 20;
+  // Creation revision pins the immutable Watch definition and action identities.
+  uint64 creation_revision = 21;
+  // Retry receipts permanently deduplicate operator commands within bounded capacity.
+  map<string, RetryReceipt> retry_receipts = 22;
+  // Recent bytes bounds retained output identities independently of pending requests.
+  uint64 recent_bytes = 23;
+}
+
+enum RetryRejectionCode {
+  RETRY_REJECTION_CODE_UNSPECIFIED = 0;
+  RETRY_REJECTION_CODE_NOT_FOUND = 5;
+  RETRY_REJECTION_CODE_FAILED_PRECONDITION = 9;
+}
+
+message RetryReceipt {
+  // Fingerprint binds the request ID to the complete public command.
+  bytes fingerprint = 1;
+  // Delivery retains the original accepted retry result, not a later outcome.
+  drasi.watch.v1.Delivery delivery = 2;
+  // Rejection code retains a semantic refusal using its gRPC status number.
+  RetryRejectionCode rejection_code = 3;
+  // Rejection message is a static redacted diagnostic.
+  string rejection_message = 4;
+}
+
+message Intent {
+  // Action ID is stable across runtime ownership changes and RPC retries.
+  string action_id = 1;
+  // Kind determines the concrete Temporal request message.
+  ActionKind kind = 2;
+  // Request is the immutable serialized Temporal workflow service request.
+  bytes request = 3;
+  // Status distinguishes pending, delivered, and terminally failed actions.
+  DeliveryStatus status = 4;
+  // Run ID records the target execution returned by a successful start.
+  string run_id = 5;
+  // Error is a redacted terminal service error.
+  string error = 6;
+  // Workflow ID identifies the immutable action target.
+  string workflow_id = 7;
+  // Target run ID pins signals to one execution.
+  string target_run_id = 8;
+  // Attempts counts persisted dispatch admissions, including interrupted calls.
+  uint32 attempts = 9;
+  // In flight is committed before an RPC can have an external effect.
+  bool in_flight = 10;
+  // Uncertain records a preceding call whose outcome was not committed.
+  bool uncertain = 11;
+  // Retry authorized consumes one explicit approval to repeat an uncertain effect.
+  bool retry_authorized = 12;
+  // Safe retry records whether the frozen request has a verified deduplication scope.
+  bool safe_retry = 13;
+  // Output retains the accepted change identity after its request is discarded.
+  drasi.watch.v1.OutputIdentity output = 14;
+  // Updated at records the latest committed delivery transition.
+  google.protobuf.Timestamp updated_at = 15;
+}
+
+message DispatchTask {
+  // Action ID selects an existing immutable intent.
+  string action_id = 1;
+}
+
+message DeadlineTask {
+  // Deadline identifies the current one-shot deadline.
+  int64 deadline_unix_nano = 1;
+}

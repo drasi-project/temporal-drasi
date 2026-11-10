@@ -1,5 +1,9 @@
 # Code Guidelines
 
+This is a proof-of-concept project. Use unmodified published Drasi crates and do
+not require plugin signatures, signing policies, or signing/publication workflows.
+Keep content-digest, ABI, platform, configuration, and authorization checks.
+
 These rules apply when authoring or reviewing code; the Behavior Review and Review Feedback Style sections apply only when reviewing code.
 Express each rule as a concise, direct statement of the expected code or review behavior.
 
