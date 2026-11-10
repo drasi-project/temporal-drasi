@@ -3,8 +3,11 @@ use serde_json::Value;
 use std::collections::BTreeMap;
 
 pub const VERSION: u32 = 1;
-pub const UPSTREAM: &str =
-    "9469f3e01ff22c4f0092c9900dfbd5051ceae545+development.e617146537075c71fc89445aa44ba657add55d26";
+pub const UPSTREAM: &str = concat!(
+    env!("TDRASI_UPSTREAM"),
+    "+temporal-native-",
+    env!("CARGO_PKG_VERSION")
+);
 pub const MAX_INPUT: usize = 1 << 20;
 pub const MAX_OUTPUT: usize = 16 << 20;
 
@@ -29,8 +32,6 @@ pub struct Config {
     pub catalogs: Vec<CatalogConfig>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub managed_plugins: Vec<ManagedPluginPair>,
-    #[serde(default)]
-    pub trust: Trust,
     #[serde(default)]
     pub limits: Limits,
 }
@@ -368,15 +369,6 @@ pub struct PluginObservation {
     pub message: String,
     pub updated_at_unix_ms: u64,
     pub verified_signer_identity: Option<Identity>,
-}
-
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct Trust {
-    #[serde(default)]
-    pub registry_prefixes: Vec<String>,
-    #[serde(default)]
-    pub identities: Vec<Identity>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

@@ -3,17 +3,22 @@
 //! This boundary does not select versions, read providers, verify descriptors, or
 //! authorize a namespace. A lease is released only after joined plugin cleanup.
 
+#[cfg(test)]
+use crate::plugins::native::LoadedPlugin;
 use crate::protocol::{
     ComponentRecipe, Error, PluginSourceRecipe, ResourceLifetime, Result, SecretRef,
 };
-use drasi_host_sdk::LoadedPlugin;
-use drasi_plugin_sdk::descriptor::{BootstrapPluginDescriptor, SourcePluginDescriptor};
-use drasi_plugin_sdk::ffi::{secret_store::FfiGetSecretResult, FfiStr};
+#[cfg(test)]
+use drasi_plugin_sdk::{
+    descriptor::{BootstrapPluginDescriptor, SourcePluginDescriptor},
+    ffi::{secret_store::FfiGetSecretResult, FfiStr},
+};
 use serde::Deserialize;
 use serde_json::{json, Value};
+#[cfg(test)]
+use std::ffi::c_void;
 use std::{
     collections::{BTreeMap, BTreeSet},
-    ffi::c_void,
     fmt,
     sync::{Arc, Mutex, OnceLock},
 };
@@ -92,9 +97,12 @@ pub struct ComponentInputs {
 pub struct CredentialLease {
     group: Uuid,
     inputs: ComponentInputs,
+    worker_audiences: Option<(String, String)>,
     released: bool,
     retained: Option<Box<dyn Send + Sync>>,
 }
+
+pub(crate) type ScopedResolver = Arc<dyn Fn(&str, &[u8]) -> anyhow::Result<String> + Send + Sync>;
 
 impl fmt::Debug for CredentialLease {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -174,19 +182,23 @@ fn router() -> &'static Mutex<State> {
     ROUTER.get_or_init(Mutex::default)
 }
 
+#[cfg(test)]
 struct ResolverContext {
     audience: usize,
     binary_sha256: String,
 }
 
+#[cfg(test)]
 type ResolverSlot = Arc<OnceLock<&'static ResolverContext>>;
 
+#[cfg(test)]
 struct ResidentContext {
     binary_sha256: String,
     artifacts: BTreeSet<String>,
     slot: ResolverSlot,
 }
 
+#[cfg(test)]
 fn contexts() -> &'static Mutex<BTreeMap<usize, ResidentContext>> {
     static CONTEXTS: OnceLock<Mutex<BTreeMap<usize, ResidentContext>>> = OnceLock::new();
     CONTEXTS.get_or_init(Mutex::default)
@@ -196,6 +208,7 @@ fn unavailable() -> Error {
     Error::new(7, "native credential router is unavailable")
 }
 
+#[cfg(test)]
 pub(crate) fn install(
     plugin: &LoadedPlugin,
     binary_sha256: &str,
@@ -241,6 +254,7 @@ pub(crate) fn install(
     Ok(())
 }
 
+#[cfg(test)]
 fn audience(plugin: &LoadedPlugin, artifact_digest: &str) -> Result<usize> {
     let key = plugin.config_resolver_injection_fn() as usize;
     let contexts = contexts().lock().map_err(|_| unavailable())?;
@@ -367,7 +381,8 @@ impl AdmissionValues {
         Ok(values)
     }
 
-    pub fn bind(
+    #[cfg(test)]
+    pub(crate) fn bind(
         self,
         scope: CredentialScope,
         recipe: &PluginSourceRecipe,
@@ -391,6 +406,39 @@ impl AdmissionValues {
             ));
         }
         self.bind_audiences(scope, recipe, source_audience, bootstrap_audience)
+    }
+
+    pub(crate) fn bind_worker(
+        self,
+        scope: CredentialScope,
+        recipe: &PluginSourceRecipe,
+        source_binary: &str,
+        bootstrap_binary: &str,
+    ) -> Result<CredentialLease> {
+        for binary in [source_binary, bootstrap_binary] {
+            if binary.len() != 64
+                || !binary
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+            {
+                return Err(Error::new(
+                    1,
+                    "worker credential audience requires a binary SHA-256 pin",
+                ));
+            }
+        }
+        let mut lease = self.bind_audiences(
+            scope,
+            recipe,
+            1,
+            if source_binary == bootstrap_binary {
+                1
+            } else {
+                2
+            },
+        )?;
+        lease.worker_audiences = Some((source_binary.into(), bootstrap_binary.into()));
+        Ok(lease)
     }
 
     fn bind_audiences(
@@ -492,6 +540,7 @@ impl AdmissionValues {
         Ok(CredentialLease {
             group,
             inputs,
+            worker_audiences: None,
             released: false,
             retained: None,
         })
@@ -505,6 +554,26 @@ impl CredentialLease {
 
     pub fn inputs(&self) -> &ComponentInputs {
         &self.inputs
+    }
+
+    pub(crate) fn worker_resolver(&self) -> Result<ScopedResolver> {
+        let (source, bootstrap) = self
+            .worker_audiences
+            .clone()
+            .ok_or_else(|| Error::new(3, "credential lease is not bound to a source worker"))?;
+        let group = self.group;
+        Ok(Arc::new(move |binary, input| {
+            let audience = if binary == source {
+                1
+            } else if binary == bootstrap {
+                2
+            } else {
+                return Err(anyhow::anyhow!(
+                    "native credential lookup is not authorized"
+                ));
+            };
+            lookup_for(audience, Some(group), input).map_err(anyhow::Error::from)
+        }))
     }
 
     /// Revoke only after source, bootstrap, subscriptions and proxy destruction are joined.
@@ -569,7 +638,18 @@ struct Lookup<'a> {
     name: &'a str,
 }
 
+#[cfg(test)]
 fn lookup(context: &ResolverContext, input: &[u8]) -> Result<String> {
+    lookup_for(context.audience, None, input)
+}
+
+fn lookup_for(audience: usize, group: Option<Uuid>, input: &[u8]) -> Result<String> {
+    if input.is_empty() || input.len() > 512 {
+        return Err(Error::new(
+            1,
+            "native credential lookup has an invalid shape",
+        ));
+    }
     let request: Lookup<'_> = serde_json::from_slice(input)
         .map_err(|_| Error::new(1, "native credential lookup has an invalid shape"))?;
     if request.kind != "Secret" || !request.name.starts_with(CAPABILITY_PREFIX) {
@@ -580,7 +660,9 @@ fn lookup(context: &ResolverContext, input: &[u8]) -> Result<String> {
         let entry = state
             .entries
             .get(request.name)
-            .filter(|entry| entry.audience == context.audience)
+            .filter(|entry| {
+                entry.audience == audience && group.is_none_or(|group| entry.group == group)
+            })
             .ok_or_else(|| Error::new(3, "native credential lookup is not authorized"))?;
         let allocation = state
             .groups
@@ -592,6 +674,7 @@ fn lookup(context: &ResolverContext, input: &[u8]) -> Result<String> {
     String::from_utf8(allocation.fields[field].value.0.clone()).map_err(|_| unavailable())
 }
 
+#[cfg(test)]
 extern "C" fn resolve(context: *const c_void, input: FfiStr) -> FfiGetSecretResult {
     let result = std::panic::catch_unwind(|| {
         if context.is_null() || input.ptr.is_null() || input.len == 0 || input.len > 512 {
@@ -800,6 +883,76 @@ pub(crate) mod tests {
             assert!(!error.message.contains("private-value"));
         }
         assert!(!CredentialLease::retained_for_graph(Uuid::from_u128(101)).unwrap());
+    }
+
+    #[test]
+    fn worker_credentials_are_bound_to_lease_and_binary_and_revoked_after_join() {
+        let source_binary = "a".repeat(64);
+        for bootstrap_binary in ["a".repeat(64), "b".repeat(64)] {
+            let graph = Uuid::new_v4();
+            let lease = values(b"opaque-worker-value")
+                .bind_worker(
+                    scope(graph),
+                    &recipe("test"),
+                    &source_binary,
+                    &bootstrap_binary,
+                )
+                .unwrap();
+            let resolver = lease.worker_resolver().unwrap();
+            let source = serde_json::to_vec(&lease.inputs.source["connection"]).unwrap();
+            let bootstrap_source =
+                serde_json::to_vec(&lease.inputs.bootstrap_source["connection"]).unwrap();
+            let other = values(b"opaque-other-worker-value")
+                .bind_worker(
+                    scope(Uuid::new_v4()),
+                    &recipe("test"),
+                    &source_binary,
+                    &bootstrap_binary,
+                )
+                .unwrap();
+            let other_source = serde_json::to_vec(&other.inputs.source["connection"]).unwrap();
+
+            assert_eq!(
+                resolver(&source_binary, &source).unwrap(),
+                "opaque-worker-value"
+            );
+            assert_eq!(
+                resolver(&bootstrap_binary, &bootstrap_source).unwrap(),
+                "opaque-worker-value"
+            );
+            assert!(resolver(&source_binary, &other_source).is_err());
+            assert!(resolver(&"c".repeat(64), &source).is_err());
+            assert!(resolver(&source_binary, b"").is_err());
+            assert!(resolver(&source_binary, &vec![b' '; 513]).is_err());
+            assert!(resolver(
+                &source_binary,
+                br#"{"kind":"EnvironmentVariable","name":"PATH"}"#
+            )
+            .is_err());
+            if source_binary != bootstrap_binary {
+                assert!(resolver(&bootstrap_binary, &source).is_err());
+                assert!(resolver(&source_binary, &bootstrap_source).is_err());
+            }
+            assert!(!serde_json::to_string(&lease.inputs.source)
+                .unwrap()
+                .contains("opaque-worker-value"));
+            lease.release_after_join().unwrap();
+            assert!(resolver(&source_binary, &source).is_err());
+            assert!(!CredentialLease::retained_for_graph(graph).unwrap());
+            other.release_after_join().unwrap();
+        }
+    }
+
+    #[test]
+    fn worker_credentials_require_canonical_binary_pins() {
+        for pin in ["", "a", &"A".repeat(64), &"0".repeat(63), &"g".repeat(64)] {
+            let graph = Uuid::new_v4();
+            let error = values(b"opaque-worker-value")
+                .bind_worker(scope(graph), &recipe("test"), pin, &"b".repeat(64))
+                .unwrap_err();
+            assert_eq!(error.code, 1);
+            assert!(!CredentialLease::retained_for_graph(graph).unwrap());
+        }
     }
 
     #[test]
@@ -1124,10 +1277,7 @@ pub(crate) mod tests {
             .unwrap();
         let (sender, mut receiver) = tokio::sync::mpsc::channel(16);
         source
-            .as_any()
-            .downcast_ref::<drasi_host_sdk::proxies::source::SourceProxy>()
-            .unwrap()
-            .initialize_redacted(drasi_lib::context::SourceRuntimeContext::new(
+            .initialize(drasi_lib::context::SourceRuntimeContext::new(
                 "credential-diagnostics-instance",
                 "credential-diagnostics-probe",
                 None,

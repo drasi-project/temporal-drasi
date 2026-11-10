@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 
+import os
 import pathlib
 import subprocess
 import tempfile
@@ -22,6 +23,19 @@ def run_make(recipe: str, *arguments: str) -> subprocess.CompletedProcess[str]:
 
 
 class BuildSelectionTests(unittest.TestCase):
+    def test_native_publication_refuses_redirected_builds(self) -> None:
+        for variable in ("CARGO_BUILD_TARGET", "CARGO_TARGET_DIR"):
+            with self.subTest(variable=variable):
+                result = subprocess.run(
+                    ["bash", "native/drasi/build.sh"],
+                    cwd=ROOT,
+                    env=dict(os.environ, **{variable: "unsupported-native-output"}),
+                    text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                    check=False,
+                )
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("requires the native default Cargo target directory", result.stderr)
+
     def test_source_inventory_excludes_ignored_build_artifacts(self) -> None:
         cache = ROOT / "native/drasi/.verification"
         cache.mkdir(exist_ok=True)

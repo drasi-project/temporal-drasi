@@ -1,8 +1,9 @@
 # Native Drasi host
 
-This crate embeds `drasi-lib` from the exact public drasi-core base in `Cargo.toml`
-plus the repository-local development overlay described below. `Cargo.lock` retains
-the resolved dependency versions. The Go adapter is `service/watch/native`. The ordinary server
+This crate embeds unmodified published Drasi packages pinned in `Cargo.toml`.
+`Cargo.lock` retains their exact registry versions and checksums. Temporal owns
+the query orchestration and foreign-source process boundary. The Go adapter is
+`service/watch/native`. The ordinary server
 build does not link Rust; native hosting requires both `temporal_with_drasi` and
 cgo.
 
@@ -24,6 +25,12 @@ The native verifier includes regression checks for these boundaries.
 The opt-in fixture starts an isolated SQLite-backed Temporal cluster, a separate
 native Watch service, and an actual Go SDK worker. It is not a stock development
 server, mock API, or production deployment:
+
+The full default browser suite also needs an administrator-reviewed plugin policy
+with a nonempty pinned catalog for its incompatibility/refusal scenario. Set
+`TEMPORAL_DRASI_PLUGIN_CONFIG` to that policy's JSON path on the fixture command.
+Without a policy, the native workflow fixture still works, but the browser
+catalog scenario fails its setup guard before exercising discovery or refusal.
 
 ```sh
 bash native/drasi/build.sh
@@ -93,12 +100,13 @@ with urllib.request.urlopen(request, timeout=10) as response:
 PY
 ```
 
-Optionally set `TEMPORAL_DRASI_PLUGIN_CONFIG` to a native plugin-policy JSON file
-containing the administrator-reviewed catalogs, trust and preload/managed pins.
-This does not make incompatible public PostgreSQL libraries compatible, relax
-signature checks, or establish PostgreSQL browser acceptance. External-source
+`TEMPORAL_DRASI_PLUGIN_CONFIG` accepts a native plugin-policy JSON file containing
+the administrator-configured catalogs and preload/managed pins.
+Signatures are not required for this proof of concept. Removing signing policy
+does not make incompatible public PostgreSQL libraries compatible or establish
+PostgreSQL browser acceptance. External-source
 capability remains false without a credential reader, an explicitly reviewed
-managed source/bootstrap pair, and fresh signed Loaded observations for both
+managed source/bootstrap pair, and fresh Loaded observations for both
 artifacts in management and every active namespace runtime. The capability is
 not authorization for a particular credential or a database-readiness lease.
 
@@ -108,7 +116,7 @@ Set `TEMPORAL_DRASI_UI_POSTGRES=1` on the same `TestDrasiUIFixture` command to a
 an owned, digest-pinned PostgreSQL 17 container. The supplied plugin policy must
 already contain exactly one reviewed PostgreSQL source/bootstrap pair and
 unambiguous immutable catalog selections. Missing review fails before Docker
-startup; the fixture does not invent trust, approve plugins, or bypass loading.
+startup; the fixture does not select unconfigured plugins or bypass loading.
 The default fixture starts no PostgreSQL container.
 
 The private manifest adds `postgres.source` and `postgres.bootstrap`, each with
@@ -143,7 +151,7 @@ DRASI_POSTGRES_E2E=1 \
   pnpm test:drasi
 ```
 
-Manifest presence is not readiness. The browser must observe the actual signed
+Manifest presence is not readiness. The browser must observe the actual
 pair Loaded with supported descriptors and then the external-source capability.
 It compares real bootstrap/insert/update/delete ResultChange payloads to actual
 Start/exact-run Signal delivery and SDK completion, not SQL acknowledgments.
@@ -156,7 +164,7 @@ drain before workers and Watch stop; the owned PostgreSQL container is removed
 last. A failed service/control shutdown retains the container and fails cleanup
 rather than removing PostgreSQL beneath live native work.
 
-Real SQL-control tests can run independently of compatible signed plugins:
+Real SQL-control tests can run independently of compatible plugins:
 
 ```sh
 TEMPORAL_DRASI_UI_POSTGRES_SQL=1 CGO_ENABLED=1 \
@@ -166,8 +174,8 @@ TEMPORAL_DRASI_UI_POSTGRES_SQL=1 CGO_ENABLED=1 \
 
 These tests verify committed rows, rollback, concurrent/lost-response retries,
 and absence of extra PostgreSQL mutations. They do not load a Source, exercise
-CDC, or establish PostgreSQL browser acceptance. Compatible, correctly signed
-published artifacts are still required for that positive proof.
+CDC, or establish PostgreSQL browser acceptance. Compatible loaded artifacts
+are still required for that positive proof; signatures and publication are not.
 
 ## Native build and verification
 
@@ -183,7 +191,8 @@ executables resolve the published library instead of Cargo's mutable build outpu
 Both debug and optimized native builds disable stripping to avoid the Rust
 toolchain's
 [misaligned Mach-O string-table regression](https://github.com/rust-lang/rust/issues/157750).
-A deployment must package that library and its runtime dependencies;
+A deployment must package that library, its matching
+`temporal-drasi-plugin-worker` companion, and their runtime dependencies;
 the Go test's development library path is not a deployment mechanism.
 
 ## Relocatable server package
@@ -199,12 +208,13 @@ tar -xzf /existing/directory/temporal-drasi.tar.gz -C /existing/directory/tempor
 ```
 
 Use `--profile release` for an optimized native library; it is the packaging
-default. Both profiles remain **unsigned unpublished development builds**, not
-release or compatible signed-plugin evidence. Existing output archives are
+default. Both profiles remain **unpublished development builds**, not
+release or compatible-plugin evidence. Existing output archives are
 refused rather than replaced. The archive has `bin/temporal-server`, the matching
-`lib/libtemporal_drasi` shared library, Temporal/Drasi licenses, documentation,
+`lib/libtemporal_drasi` shared library, the matching
+`lib/temporal-drasi-plugin-worker` executable, Temporal/Drasi licenses, documentation,
 and a manifest
-with artifact hashes, native ABI, public Drasi base, dependency/overlay hashes
+with artifact hashes, native ABI, exact crates.io dependency checksums
 and actual Rust compiler/Go build metadata. Archive timestamps and ownership are
 normalized.
 
@@ -213,15 +223,18 @@ Its package-only `temporal_drasi_packaged` build tag omits the checkout fallback
 Ordinary native development builds retain their existing checkout path. The
 bundle can be moved as a unit; moving only the executable is not supported.
 Native Linux/macOS amd64 and arm64 builds are supported by the command;
-cross-target builds are refused.
+cross-target builds and redirected `CARGO_TARGET_DIR` output are refused rather
+than publishing stale artifacts from the expected native output directory.
 Linux packages require a compatible glibc/C++ runtime from the build platform,
 not the repository's ordinary no-cgo Alpine server image. macOS packages require
 a compatible macOS system runtime. Arbitrary plugin dependencies are not bundled.
 
 The retained relocation proof builds an archive, verifies every manifest hash,
 moves its contents to another directory, runs the server and actual native query
-evaluation with durable replay, then removes the bundled library and requires
-loader refusal despite the development library remaining in this checkout:
+evaluation with durable replay, and constructs, starts and stops a copied SDK
+Source fixture through the relocated companion. It requires missing bundled
+worker/library failures. The library-loader check runs despite the development
+library remaining in this checkout:
 
 ```sh
 GOMAXPROCS=2 python3 native/drasi/tests/test-package.py
@@ -234,89 +247,103 @@ stable Watch volume separately as documented below. This package does not create
 schemas, start services, configure a credential provider, install PostgreSQL
 plugins, include the Temporal UI, or establish PostgreSQL/browser acceptance.
 
-## Development dependency overlay
+## Published Drasi dependencies
 
-The public base is `9469f3e01ff22c4f0092c9900dfbd5051ceae545`. The included
-[`patches/drasi-core-current-main-prerequisites.patch`](patches/drasi-core-current-main-prerequisites.patch)
-adds the remaining native prerequisites without replacing the base's owned
-terminal shutdown or bootstrap handover implementation. It provides
-`RecoveryPolicy::ExistingOnly`, managed per-start `start_query_existing`,
-stopped-and-joined `remove_query_preserving_state`, dependency-owned PostgreSQL
-export versions, canonical typed/reference configuration schemas, referenced
-bootstrap TLS resolution, and opt-in redacted SDK callbacks. Properties, data
-and returned errors remain the caller's redaction responsibility.
+The integration pins unmodified crates.io packages in `Cargo.toml` and
+`Cargo.lock`. It uses `drasi-lib` 0.9.3, host/plugin SDK 0.11.3 and core 0.5.10,
+matching the public PostgreSQL source 0.2.12 and bootstrap 0.2.15 release family.
+No Drasi Git dependencies, patches, path overrides, vendored forks, or upstream
+changes are required. The index, state-store and WAL packages are also pinned
+to published releases rather than unpublished workspace version bumps.
 
-Every native runtime owner explicitly enables
-`DrasiLib::builder().with_bootstrap_certification(true)`. This requires complete,
-durable initial images and rejects missing requested bootstrap streams. The
-SDK default remains false for its existing mixed/no-provider callers. The flag
-is startup validation, not query identity. `ExistingOnly` always requires
-certified existing state. Completed and pending bootstrap markers are
-recognized without silently resetting an incomplete image, and failed or timed
-out shutdown retains ownership rather than reporting Stopped.
+Release-family alignment is not complete runtime compatibility. The published
+SDK's dedicated bootstrap path does not durably write its initial result rows,
+and failed-stop cleanup and foreign provider ownership differ from the former
+development snapshot. The dependency switch alone does not repair these gaps.
+Native cold-recovery, failed-shutdown, plugin reopen and PostgreSQL gates
+must pass before this build can be treated as a supported integration.
 
-This is an unpublished development source build, not a released upstream
-revision or evidence of signed PostgreSQL artifacts. It uses actual SDK/host
-`0.12.0`, binary FFI ABI `0.15.0`, core `0.5.10`, lib `0.9.4`, PostgreSQL source
-`0.2.13`, and bootstrap `0.2.16`. The native C ABI remains version 1.
-The prerequisite change is proposed upstream in
-[drasi-project/drasi-core#1005](https://github.com/drasi-project/drasi-core/pull/1005);
-that proposal does not make this local pin a trusted-main publication.
+Query creation registers a Temporal-owned implementation of the public SDK
+`Query` trait. It uses public Core evaluators and persistent indexes, not the
+SDK's `DrasiQuery` bootstrap processor. Complete bounded source snapshots, source
+cuts, keyed result rows and a versioned query seal commit in one index session.
+The initial snapshot has sequence zero and an empty outbox. Future evaluation
+starts only after that baseline commits. Restart validates the seal, rows,
+configuration, generation and retained outbox before publishing readiness.
+Missing or corrupt committed state is refused, not reset or silently bootstrapped.
+A separate native control-store witness fences the index commit and survives loss
+of the entire query index directory, including future-only query state with no
+Watch. Bootstrap failures before that fence remain retryable. An uncertain commit
+without its sealed indexes requires explicit recovery rather than reseeding.
+The host preserves its separate admission identity, pending handoffs and receipts,
+and checks output generation and contiguous positions before accepting output.
+Permanent query retirement uses ordinary `remove_query`, which reclaims the
+retired query's SDK indexes, checkpoints and output. Host tombstones and accepted
+delivery records remain durable.
 
-`build.sh` and `verify.sh` run `prepare-core.py`. It checks the complete patch's
-SHA256 `e876e1de337c0598b0ac4983da770d63e4682a92d8c5c1c62f4e4fa25682018a`,
-fetches only the pinned public base into an isolated ignored checkout, and checks
-the complete patched Git tree
-`e617146537075c71fc89445aa44ba657add55d26`. This includes the reviewed
-cancellation, retained-publication, interrupted-reset and checkpoint-admission
-corrections and joins the synthetic future-queue source when stop cancellation
-interrupts bootstrap-completion delivery. The SDK/ABI family and upstream lock
-are unchanged. Cargo overrides use only
-repository-relative paths in a cache keyed by that tree; old verified trees
-remain untouched when the pin changes. No companion worktree
-or shared Cargo cache is modified. Preparation is serialized and publishes the
-verified checkout atomically. Modified cached source, staged changes and
-untracked files fail verification rather than being reset or silently repaired.
+The selected foreign-source boundary uses one supervised companion process per
+Source, with child-local state files included in the native checkpoint tree.
+Only that child loads foreign libraries. It uses `src/plugins/native.rs` and the
+public FFI registration/function tables, without private SDK layout casts.
+Host WAL injection is disabled: SDK0.11.3's WAL bridge passes Rust-layout values
+across library boundaries. PostgreSQL0.2.12 supports native LSN replay without it;
+other sources must satisfy their administrator-reviewed native replay contract.
+Opaque positions that the SDK cannot preserve are refused before acknowledgement.
+Source stop requires an actual child reap and joined IPC owners. Final close also
+prevents a retained Source reference from starting another process before
+credentials are revoked. The companion is resolved beside the actual loaded
+native library, not from `PATH`, the Go executable, or a checkout fallback.
+The unsigned native PostgreSQL fixture exercises bootstrap, live CDC, offline
+changes, cold recovery and query stop/restart through this boundary.
+Configured-plugin installation, complete package and browser acceptance remain separate gates.
+
+This is an unpublished Temporal development build. The unmodified dependency uses SDK/host
+`0.11.3`, binary FFI ABI `0.14.0`, core `0.5.10`, lib `0.9.3`, PostgreSQL source
+`0.2.12`, and bootstrap `0.2.15`. The native C ABI remains version 1.
+
+`build.sh` and `verify.sh` run `verify-dependencies.py`. It checks that every
+resolved Drasi package has exactly one registry version, matches its locked
+crate checksum, and has unmodified source bytes matching the downloaded
+archive. Changed sources, additional files and source symlinks fail verification
+rather than being reset or silently repaired. Package provenance records the
+actual registry versions, checksums and licenses; it does not claim a Git tree.
 
 Before invoking Cargo directly, run:
 
 ```sh
-python3 native/drasi/prepare-core.py
+python3 native/drasi/verify-dependencies.py
 ```
 
-Git, Python 3 and network access to the public repository are required for the
-first preparation; verified cached source can be reused offline. Checkpoint
-`upstream` and the persisted native runtime definition identify both this base
-and the development tree. Restore, warm open, dormant admission, and retirement
+Cargo, Python 3.11 or newer and initial registry access are required; populated
+Cargo caches can be reused offline. Checkpoint `upstream` and the persisted
+native runtime definition identify the complete locked Drasi package set by
+its version/checksum digest, followed by `+temporal-native-<package version>` for
+Temporal's owned storage/runtime format. Format changes require a native package
+version change. Restore, warm open, dormant admission, and retirement
 refuse other or missing build identities before opening query indexes or
 rewriting retained admission state. There is no automatic cross-build storage
-migration: this family also upgrades RocksDB from 8.10 to 10.4.2.
+migration, including from the previous unpublished Git build and its newer
+RocksDB format.
 
-The four earlier overlay patches and frozen tree
-`7bf4530999d24a435db70a6ac6e07c27b26253ac` are retained as historical development
-artifacts, not applied to the new base. Their SDK 0.11.3/ABI 0.14 proofs and
-packages do not verify the current family. The old source cache is not modified.
-The initial SDK 0.12 candidate tree
-`198a2fbe0e9eb5f819d4ac5cce5622252d6ffe72` is also retained in its separate
-cache and Git history. Its evidence does not substitute for verifying the
-reviewed tree, despite their identical package versions.
-The intermediate reviewed tree
-`029e8390bfc0a6e426ace96012593e743b068f65` likewise remains isolated; it does not
-include the final cancellation-safe future-queue join.
+Older Git caches and evidence remain historical and do not verify this registry
+build. They are not selected or modified by production dependencies or
+verification. Existing runtime storage is not silently retagged.
 
-The verifier also runs the prepared SDK's recovery, durable bootstrap, and
-preserving-removal tests plus SDK Clippy in a disposable checkout:
+The verifier also runs the published SDK's query, bootstrap and recovery tests
+from an isolated copy of the checksummed crate:
 
 ```sh
 CARGO_BUILD_JOBS=2 python3 native/drasi/tests/test-sdk-recovery.py
 ```
 
-It reconstructs and verifies the same exact source tree before installing the
-independently validated SDK workspace lock from
-`tests/fixtures/drasi-core.Cargo.lock` (SHA256
-`fae0da19cfd0c227d9312beb2d668f93aaaf854472018fa28b334ba8af0699d1`).
-The prepared source cache remains unchanged; generated files are confined to the
-disposable checkout and the existing native Cargo target directory.
+The driver leaves the published source and manifest unchanged. A separate
+verification manifest points at that source and restores the registry-only
+development dependencies omitted from the published manifests. Independent
+registry test locks in `tests/fixtures` freeze those verification dependencies;
+the isolated workspace contains no dependency patches.
+The registry cache remains unchanged; generated files are confined to the
+disposable workspace and the existing native Cargo target directory. Missing
+retained test selections are errors, not successful zero-test runs.
 
 The same driver can run the existing SDK's real PostgreSQL container tests:
 
@@ -328,7 +355,7 @@ This requires Docker and exercises schema discovery, CRUD, bootstrap/CDC
 handover, source positions, LSN replay, and persistent multi-query restart.
 Its containers are owned and cleaned up by the SDK test fixtures. It uses the
 PostgreSQL source and bootstrap libraries directly; it does not install native
-artifacts, change signer policy, or prove signed-plugin, Temporal workflow, or
+artifacts or prove configured-plugin installation, Temporal workflow, or
 browser acceptance.
 
 To exercise those components across the actual native plugin ABI and managed
@@ -338,25 +365,100 @@ Source/Query host, run:
 CARGO_BUILD_JOBS=2 RUST_LOG=error python3 native/drasi/tests/test-sdk-recovery.py --native-postgres
 ```
 
-This builds the corrected source and separate bootstrap libraries from the same
-frozen SDK checkout, runs the schema and referenced-TLS regressions plus SDK/plugin
-Clippy, and executes an exactly selected native test against an owned PostgreSQL 17
-container. It covers
-credential-reference binding, schema validation, initial query results, SQL CRUD
+This builds Temporal's `plugins/postgres` library from unmodified, published
+PostgreSQL Source and bootstrap descriptors, runs adapter Clippy,
+and executes an exactly selected native test against an owned PostgreSQL 17
+container. The packaging adapter exports the real linked core/lib versions and
+supplies complete, typed schemas for the public PostgreSQL DTO fields instead
+of their unresolved generic schema references. It accepts literal values and
+host-bound Secret references, not arbitrary environment lookups. Bootstrap TLS
+configuration resolves through the public SDK mapper before
+delegating to the unchanged bootstrap descriptor. Before each snapshot, the
+adapter uses the released Source's public replication API to create or retain
+the Source configuration's slot. WAL is therefore retained before the snapshot
+boundary is chosen, not created asynchronously after that boundary is needed
+for replay. Neither native fixture precreates the slot. The adapter does not replace the
+PostgreSQL connector or bypass compatibility checks. The driver also runs the adapter's
+schema and literal/referenced TLS regressions, including unresolved and invalid
+TLS refusal. The fixture covers credential-reference binding for password and
+TLS mode, strict port/enum schema validation, initial query results, SQL CRUD
 and filtering, durable unacknowledged output replay, and CDC committed while the
 host is closed. A second query also consumes a real insert while the first query
 is stopped; resuming the first must replay that insert exactly once through its
 retained Watch subscription. Recovery must preserve the generation and semantic config hash
 and advance the sequence exactly once for each result change. Persisted native
 files must not contain the database password. The test-only loader uses private
-resident handles; it does not install artifacts, exercise signatures, expose an
-unsigned production route, or claim public plugin Loaded status. The container
-and SDK checkout are removed on exit. Docker and Python 3.11 or newer are required.
+resident handles; it does not install artifacts or claim public plugin Loaded
+status. The container is removed on exit. Docker and Python 3.11 or newer are required.
+
+The configured-plugin and PostgreSQL browser fixtures also accept a single
+artifact exporting both PostgreSQL descriptors. Source and bootstrap selections
+may share its immutable digest; both descriptor categories still have to load
+and pass their schema and credential checks. Distinct artifacts remain supported.
+
+### Preparing the Temporal PostgreSQL plugin
+
+Build an unsigned native bundle in a new directory whose parent already exists:
+
+```sh
+CARGO_BUILD_JOBS=2 python3 native/drasi/plugins/postgres/prepare.py \
+  --profile debug /existing/directory/temporal-postgres-bundle
+CARGO_BUILD_JOBS=2 python3 native/drasi/tests/test-postgres-package.py
+```
+
+The default profile is `release`. The preparer calls the actual exported
+`drasi_plugin_metadata()` without initializing the plugin. It checks the native
+target, linked core/lib/plugin versions, and public FFI ABI against the exact
+unmodified SDK and workspace lock. Registry `sdk_version` is the SDK crate
+version, not the distinct binary FFI ABI version. The bundle contains the
+library, `metadata.json`, `provenance.json` with hashes, source revision, dirty
+state and exact registry package provenance, and a ready-to-use `catalog.json`.
+The catalog pins the actual binary as `local@sha256:<binary hash>`, references its
+absolute final path, and includes its Source/bootstrap managed pair.
+Existing bundles and cross-target or redirected Cargo builds are refused.
+
+To run the retained PostgreSQL bootstrap/CRUD/replay test against the actual
+optimized bundle instead of the development library, use:
+
+```sh
+CARGO_BUILD_JOBS=2 python3 native/drasi/plugins/postgres/prepare.py \
+  --profile release /existing/directory/temporal-postgres-release
+CARGO_BUILD_JOBS=2 RUST_LOG=error python3 native/drasi/tests/test-sdk-recovery.py \
+  --native-postgres --postgres-bundle /existing/directory/temporal-postgres-release
+```
+
+The driver checks recorded hashes, the exact SDK origin and the library's
+actual exported ABI before using its private test-only resident handles.
+This remains library/data-path acceptance, not installation or browser proof.
+
+No signing, registry upload, or publication workflow is required. Install and
+load the prepared bundle through the normal configured-catalog APIs:
+
+```sh
+TEMPORAL_DRASI_PLUGIN_CONFIG=/existing/directory/temporal-postgres-bundle/catalog.json \
+  bash native/drasi/verify-plugins.sh
+TEMPORAL_DRASI_PLUGIN_CONFIG=/existing/directory/temporal-postgres-bundle/catalog.json \
+  bash native/drasi/verify-postgres.sh
+```
+
+The PostgreSQL verifier runs the actual install/load/idempotency gate
+before creating its database container. An incompatible or corrupted artifact
+fails there without starting PostgreSQL. Passing that gate still does not prove
+the subsequent bootstrap, SQL mutation or browser behavior. After the query
+and SQL-mutation assertions pass, the verifier checks the owned database's
+command log to prove slot creation preceded the bootstrap snapshot.
+
+The positive PostgreSQL browser fixture above is a further, separate gate.
+The metadata inspector checks exact manifest/binary pins and metadata integrity
+for public OCI artifacts or local bundles; it never requires signatures.
+Its optional `--verify-release-tags` flag checks the upstream version-platform
+tag convention for public artifacts. Local bundles use their binary digests
+directly and have no release tags.
 
 The `All Tests` workflow is configured to run the native verifier and both PostgreSQL
 container tests in its `Native Drasi and PostgreSQL SDK` Linux arm64 job. This
 keeps the data-path checks in CI without substituting them for the separate
-signed-plugin and browser acceptance gates.
+configured-plugin and browser acceptance gates.
 
 To run the full native verifier on Linux from a macOS worktree, use
 `python3 native/drasi/tests/test-linux.py`. It requires Git and Docker, snapshots
@@ -366,7 +468,7 @@ Recorded submodule pins are preserved without initializing their checkouts.
 The container receives only a read-only snapshot, not the original worktree,
 prepared caches, Docker socket, or host credentials. Its build tools use Go
 1.27.0, Rust 1.96.1 and Python 3.12.13 on Debian Bookworm. This checks Linux native execution and
-package relocation, not the Ubuntu GitHub runner or signed PostgreSQL/browser
+package relocation, not the Ubuntu GitHub runner or PostgreSQL/browser
 acceptance. The owned container and checkout are removed on exit. Docker retains
 the tool image and a worktree-keyed build cache, not runtime or checkpoint state.
 Runs sharing that cache serialize through its verification lock.
@@ -406,9 +508,10 @@ The Go adapter also joins its published completion owner before entering native
 teardown. They cannot tear down the graph or copy its stores while a joined
 plugin call remains outstanding. An unwound flight retains native capacity,
 quarantines its handle and prohibits checkpoint success; ordinary operation
-errors remain terminal outcomes, not proof that no effects occurred. Close uses
-the SDK's joined shutdown as the single component-stop boundary. These are
-host-operation guarantees, not a sandbox for arbitrary native plugin threads.
+errors remain terminal outcomes, not proof that no effects occurred. Close first
+stops and joins each actual runtime owner. It does not treat the SDK's best-effort
+shutdown as cleanup proof. These are host-operation guarantees, not a sandbox for
+arbitrary native plugin threads.
 
 A failed or interrupted native shutdown permanently disqualifies that Host from
 publishing checkpoints. Repeated close attempts can clean up remaining work but
@@ -485,9 +588,10 @@ unknown-mode fallback to be refused before admitting an isolated successor.
 
 Recovery preserves engine indexes, WAL, durable results, and pending deliveries
 without opening or repairing them. A successful snapshot is **not** certification
-of engine semantic validity or external connector replay. Normal managed
-`ExistingOnly` query admission still validates retained output and resume
-positions; corrupt or unavailable state fails closed rather than rebootstrap.
+of engine semantic validity or external connector replay. Normal managed query
+admission uses stock `Strict` startup. The handoff protocol
+checks retained output generation and contiguous positions separately; this is
+not a promise that SDK startup never initializes or repairs native state.
 
 The immutable recovered cut is `recoveries/<epoch>`, separate from
 `checkpoints/<epoch>`, which a delayed cooperative Seal may still name. Publication
@@ -530,13 +634,15 @@ are deleted. Queries retire before their Sources. Already accepted
 History deliveries continue draining independently of native retirement.
 
 Retirement persists and syncs irreversible intent before stopped-only SDK removal,
-preserves Query indexes, checkpoints and output state, then syncs completion.
+reclaims the retired Query's SDK indexes, checkpoints and output state, then
+syncs completion. Host admission tombstones and accepted delivery records remain.
 Retired lifetimes cannot be readmitted and are not reconstructed by a successor.
 Completion releases the 64-Source/256-Query runtime slots; full immutable admission
 recipes remain within the existing 8 MiB catalog bound. The first retirement
 upgrades the catalog to version 2, which older binaries reject before runtime
-construction. Retirement is not disk garbage collection or unlimited definition
-churn. Any uncertain cleanup fences admission and checkpoint publication.
+construction. This is not general disk garbage collection or unlimited definition
+churn: retained host catalog and delivery state are not pruned. Any uncertain
+cleanup fences admission and checkpoint publication.
 
 Each Watch has independent control and intake workers. Its durable native binding
 precedes History control creation. Recovery retrieves the original Watch
@@ -628,8 +734,7 @@ bounded to 16 KiB before base64 encoding, and native control state is bounded to
 
 Temporary capture disablement or an unavailable owner suspends native readiness;
 dependent Watches cross their History pause barrier, queries stop, and the input
-worker joins before source stop. Ordinary restart uses retained cursors and
-ExistingOnly query recovery. A structured capture-discontinuity error or invalid
+worker joins before source stop. Ordinary restart uses retained cursors and stock `Strict` query recovery. A structured capture-discontinuity error or invalid
 projection permanently blocks that source incarnation instead of rebuilding it
 silently. A new source incarnation and updated dependent pins are required to
 reconstruct after an actual gap.
@@ -799,7 +904,7 @@ ResourceExhausted. Missing, partial, or unknown native verdicts fail closed, and
 an operational failure cannot be hidden by an earlier schema mismatch.
 The management command retains its actual completion owner after a caller stops
 waiting. This schema check does not advertise external-source capability or
-prove PostgreSQL/bootstrap recovery; those gates still require compatible signed
+prove PostgreSQL/bootstrap recovery; those gates still require compatible
 artifacts and positive lifecycle verification.
 
 Compiler acceptance is not execution, a static property-type check, or a claim
@@ -874,7 +979,7 @@ preflight is not a second runtime identity authority.
 Custom server builds configure administrator policy with
 `temporal.WithDrasiPluginPolicy(watch.PluginPolicy{...})` and their provider
 adapter with `temporal.WithDrasiCredentialReader(reader)`. The policy contains
-`Preload`, `Catalogs`, `Trust` and exact `ManagedPlugins` descriptor pairs;
+`Preload`, `Catalogs` and exact `ManagedPlugins` descriptor pairs;
 it contains no resolved secrets. Graphs detach its slices before use. No policy
 or reader is installed by default. These options affect only the opt-in Watch
 role and perform no credential reads in ordinary/no-cgo builds.
@@ -891,8 +996,8 @@ Without an adapter, recipes with credential references fail explicitly.
 
 `Config.managed_plugins` defaults empty. An administrator must review and allow
 the exact pinned Source/bootstrap descriptor pair's replay, stop/drop and
-bootstrap-completion contract. This is separate from verifying artifact
-signatures and is not a claim supplied by a plugin or namespace writer.
+bootstrap-completion contract. This is separate from content and compatibility
+checks and is not a claim supplied by a plugin or namespace writer.
 Only already-loaded, exactly pinned descriptors can construct instances.
 
 Persisted recipes contain ordinary configuration and immutable
@@ -905,22 +1010,24 @@ assertions and recursive/excessive schemas fail closed. UI hints do not authoriz
 secret fields, and `format` remains descriptive rather than an assertion.
 This is not a general JSON Schema implementation.
 
-Managed wrappers expose only the public recipe through Source properties, use
-the SDK's redacted per-instance initialization, and sanitize factory, lifecycle,
-subscription and asynchronous bootstrap errors. Source data remains application
-data, not a sanitized diagnostic channel. Native code is trusted, not sandboxed.
-Source and bootstrap capabilities remain distinct and survive normal stop/start.
-After a cleanly stopped failed start, explicit stop followed by an observed
-Stopped state permits retrying the same resident instance and lease; it does not
-permit a replacement factory or clear an unproved-cleanup fault.
+Managed Sources expose only the public recipe through Source properties. Their
+companions sanitize factory, lifecycle, subscription and asynchronous bootstrap
+errors. Credential callbacks are bound to the exact lease and binary audience;
+plaintext values travel only in transient resolver replies, never arguments,
+environment variables, state files or public properties. Source data remains
+application data, not a sanitized diagnostic channel. Native code is trusted,
+not sandboxed. Source and bootstrap capabilities remain distinct and survive
+normal stop/start. An explicit clean stop permits restarting the same graph
+Source and lease with a fresh child epoch and the same source-local state. It
+does not authorize a new managed admission or clear an unproved-cleanup fault.
 
 Dormant reopen constructs no retained plugin Sources and deliberately defers
 their dependent Queries. These exact skipped entries report `Deferred`;
 unexplained disappearance or a retained fault reports recovery required.
 Persisted pending handoffs remain pollable and acknowledgeable while deferred.
 Further output is explicitly unavailable until dependencies are materialized and
-the retained Query passes `ExistingOnly` recovery. Warm restart likewise uses
-`start_query_existing`, preserving the configured creation policy.
+the retained Query validates its owned seal and satisfies handoff continuity checks.
+Warm restart uses the public `start_query`, without replacing the runtime.
 The Go planner admits Deferred nodes only when desired state and dependency
 readiness permit it. Deferred dependencies do not block stopping their Source.
 Public status reports deferred desired-running nodes as Starting, never Running;
@@ -928,17 +1035,18 @@ a deliberately stopped deferred node can confirm Stopped without construction.
 An operator-requested Source stop can invoke native materialization-fault
 cleanup; a running desired state never silently clears that fault.
 
-Close releases SDK graph/query/subscription owners before destroying managed
-instances and revoking their capabilities. Failed joins, outstanding Source
-references and abandoned work quarantine the instance and credential allocation,
+Close joins owned query epochs and source processes before destroying managed
+instances and revoking their capabilities. A retained safe Source reference does
+not prevent cleanup after final close has joined its child and prohibited restart.
+Failed joins and failed stops quarantine the instance and credential allocation,
 block checkpoint publication, and retain directory ownership. A later reference
-drop or no-op close does not undo that decision.
+drop or no-op close does not undo a retained cleanup failure.
 
 The actual-library fixture verifies managed admission, warm/cold recovery,
 nonempty output and contiguous delivery, pending handoff recovery, sanitized
-errors, resident retries and retained-reference/failed-stop fencing. Damaged
-hashes, reset markers and corrupt outbox entries are refused without changing
-any logical RocksDB column-family bytes. The plugin fixture itself emits an
+errors, graph-identity-preserving child retries and retained-reference/failed-stop
+fencing. Owned query recovery validates hashes, keyed rows, checkpoints and the
+sealed outbox rather than using SDK reset-marker recovery. The plugin fixture itself emits an
 empty positional bootstrap; nonempty changes come from a second built-in test
 Source. These checks do not prove PostgreSQL CDC, arbitrary plugin lifecycle
 contracts, provider-adapter authorization or browser acceptance. The C-boundary
@@ -947,10 +1055,9 @@ retain their native transfer permits, and construct only one resident instance.
 Go tests cover byte limits, exact references and component slots, partial-error
 clearing, redacted provider failures, no-cgo refusal, namespace UUID routing,
 deep observation copies and real native refusal before provider reads.
-Production signatures remain mandatory; these test seams do not admit unsigned
-artifacts through the production loader. Durable install/load intent and its
+Signatures are not required. Durable install/load intent and its
 private runtime reconciliation and public plugin management are described below.
-A compatible signed PostgreSQL acceptance run remains separate work; it is not
+A compatible PostgreSQL acceptance run remains a separate gate; it is not
 advertised by this wiring.
 The verifier also rejects credential/capability fixture markers in captured
 native test diagnostics, redacting those markers before printing a failure.
@@ -984,18 +1091,15 @@ can be checked. Existing replay still uses the SDK's historical replay allocatio
 
 This boundary covers only changes already accepted into native storage. It does
 not prove upstream History enumeration completeness, durable shard-vector intake,
-or uninterrupted capture. The SDK overlay owns bootstrap evaluation and commits
-the complete keyed initial image, every handover and explicit result sequence zero.
-It reads back that publication before writing a distinct completed marker or
-exposing readiness. Empty images follow the same protocol; historical rows do not
-become live outbox entries. Cold and warm recovery validate the certified image
-without changing its generation. Partial or uncertified legacy zero images refuse
-recovery rather than silently becoming empty. A live event with no result change
+or uninterrupted capture. The owned query actor evaluates complete source
+snapshots through unmodified Core, commits keyed initial output with all source
+cuts, and replays from that sealed boundary. It does not certify a legacy empty
+image without a successful positional bootstrap. A live event with no result change
 can advance its source checkpoint while the result sequence remains zero.
-Bootstrap or storage errors fail readiness. Stop joins the owned processor before
-releasing source positions; SDK shutdown retains backend handles after failed or
-unfinished joins. These guarantees do not establish third-party source shutdown
-or upstream History baseline completeness.
+Bootstrap or storage errors block output. Uncertain cleanup retains host ownership
+and credentials; a successful foreign SDK stop call alone is not completion
+proof without child reap and joined IPC owners. These boundaries do not establish
+upstream History baseline completeness.
 
 The outer output protocol normalizes native row and aggregation diffs into
 `ADD`, `UPDATE`, and `DELETE`. Drasi aggregation diffs can contain a default
@@ -1024,13 +1128,12 @@ automatic reset.
 
 New initialization is permitted only in an empty owned directory (apart from
 `owner.lock`). The immutable definition and identity reserve that creation before
-SDK I/O. Every reopen uses the SDK's `ExistingOnly` reads, never an outer preflight
-followed by unsafe `Strict` startup. Missing or changed hashes, reset markers,
-unreadable checkpoints and inconsistent durable output block recovery instead of
-rebuilding. Missing control identity/definition in a used directory also fails.
-A crash after reserving creation but before the SDK has initialized a query can
-therefore require explicit operator recovery/reset; a retry cannot silently grant
-fresh initialization again.
+SDK I/O. Reopen validates that host identity before owned-query startup.
+Missing control identity/definition in a used directory fails. Owned query
+recovery refuses unsealed, missing or inconsistent committed state instead of
+adopting an SDK reset marker. Retained Watch handoffs
+still refuse changed output generations or noncontiguous output. Such a fault
+requires explicit operator recovery/reset, not cursor advancement.
 
 The SDK's whole-graph start is best-effort for queries. The outer host additionally
 checks each query's actual runtime status, rather than claiming success for a
@@ -1076,7 +1179,7 @@ The catalog persists `intended` before SDK admission. A query is provisioned
 without auto-start; `provisioned` consumes its one creation permission before
 starting it. A retry inspects the existing runtime rather than removing or
 replacing it. An unconsumed intent can still create its query; a crash after
-consumption requires `ExistingOnly`, even if no native hash was written.
+consumption uses stock `Strict` startup; it can initialize missing native state.
 Recovery reconstructs admitted sources and queries from the retained catalog
 before the SDK's normal startup and subscription-completion sequence. A failed
 admitted query remains visible without preventing healthy admitted queries from
@@ -1097,9 +1200,8 @@ query recovery; unrelated retained nodes remain stopped. This is a mechanism,
 not the production controller or a plugin feedback/shutdown proof.
 
 A first-created query retains the SDK's `Strict` configuration in memory.
-Consumed admissions now start stopped runtimes through the managed
-`start_query_existing` operation. It uses `ExistingOnly` for that invocation
-without changing the configured policy or replacing the query runtime.
+Consumed admissions start stopped runtimes through the public `start_query`
+operation, without changing that policy or replacing the query runtime.
 Failed or stopping runtimes still require normal stop cleanup before retry.
 Real native tests preserve the same runtime, pending bytes, generation and
 contiguous output across warm restart. An injected source-position gap fails
@@ -1225,9 +1327,10 @@ The normal verifier runs these reader checks in native and both no-cgo modes.
 
 ## Trust and recovery
 
-Plugins require configured registry allowlists, pinned digests, binary hashes,
-and trusted keyless signer identities. The host SDK verifies artifacts before
-loading their descriptors. External sources require an explicit bootstrap
+Plugins require configured catalogs, pinned digests, binary hashes and exact
+release/ABI/core/lib/platform compatibility. Signatures and signer identities
+are not required. The host checks content and actual exported metadata before
+loading descriptors. External sources require an explicit bootstrap
 descriptor. Libraries remain loaded until process exit; there is no live unload
 or replacement operation.
 
@@ -1341,17 +1444,20 @@ if err != nil {
 // loaded.Installation.Plugin.Descriptors contains the SDK's real component schemas.
 ```
 
-Install verifies the keyless signer, manifest digest, exact release/SDK version,
-core/lib versions, platform, and administrator-pinned binary hash. It uses the
-SDK's OCI downloader and signature verifier, checks the downloader's separate
-verification result, and atomically publishes a read-only binary and verification
-receipt under `plugins/<manifest-digest>/<binary-sha256>/`. Existing entries are
+Install checks the manifest digest for OCI artifacts, exact release/SDK version,
+core/lib versions, platform, and configured binary hash. It uses the
+unmodified SDK's OCI downloader with its default disabled signature verifier.
+For local bundles, `reference` is `local@sha256:<binary hash>` and
+`local_catalog_path` is the absolute library path beside `metadata.json`.
+Local content is checked before the SDK's install/copy operation and again
+after copying. The host atomically publishes a read-only binary and content
+receipt under `plugins/<artifact-digest>/<binary-sha256>/`. Existing entries are
 revalidated, never overwritten or silently repaired. Interrupted staging
 directories are not installations. Retries converge on the same immutable
 artifact; no request ID or authoritative desired state is stored here.
 
-Load requires an installed, intact cache entry. It re-verifies the signature
-and signed metadata, checks the binary's embedded metadata before
+Load requires an installed, intact cache entry. It rechecks cached content and
+checks the binary's embedded metadata before
 `drasi_plugin_init`, then uses the SDK loader. Process-wide per-identity
 initialization slots retain the SDK handle and reject replacement pins with
 `restart_required`, even after a runtime closes. Concurrent attempts to load the
@@ -1359,8 +1465,8 @@ same artifact share initialization; library I/O occurs outside the process-map
 mutex. Rejected libraries that have been opened also remain resident.
 
 `PluginObservation` is host-local, with a typed `PluginHostState`, runtime
-`host_id`, observation time, redacted diagnostic, and signer identity only
-after verification. `installed` means verified cache bytes exist; `loaded`
+`host_id`, observation time, and redacted diagnostic. Legacy optional signer
+fields remain empty. `installed` means content-checked cache bytes exist; `loaded`
 means descriptors were registered in this runtime. Failed install/load calls
 return an error and retain a queryable failed observation rather than returning
 success. A subsequent observation checks cache integrity again. No status
@@ -1513,8 +1619,7 @@ per-member observations. They are not synchronous attestations of successful
 native verification or initialization. Retained metadata deliberately omits
 host-dependent compatibility and descriptor support claims; inspect the catalog
 release for current discovery metadata and each host for actual verification.
-Verified signer identity appears only in actual host evidence, never inferred
-from advertised provenance. Empty membership is explicitly unavailable.
+Signer identity is not a readiness condition. Empty membership is explicitly unavailable.
 
 `GET /api/v1/drasi/plugins/installations` returns digest-ordered, generation-fenced
 pages. Every selected artifact reserves space for its metadata and all 64
@@ -1526,15 +1631,15 @@ and does not constitute a transactional cluster-wide snapshot.
 The actual Watch-role integration fixture exercises public catalog/capability
 reads, installation and Load receipt replay, and HTTP installation reads before
 and after a Watch-process restart. Its unconfigured artifact must remain Unknown.
-It is not positive signed-plugin, PostgreSQL CDC, or browser acceptance evidence.
+It is not positive configured-plugin, PostgreSQL CDC, or browser acceptance evidence.
 
 #### Pinned SDK limitations
 
-* OCI metadata's `sdk_version` is the SDK **crate release** (`0.12.0`), not
-  the binary FFI ABI (`0.15.0`). Discovery exposes the crate release as
+* OCI metadata's `sdk_version` is the SDK **crate release** (`0.11.3`), not
+  the binary FFI ABI (`0.14.0`). Discovery exposes the crate release as
   `sdk_version`; `abi_version` remains empty until actual verified load.
   The host uses the SDK's exported crate version rather than duplicating it.
-  Core and lib must be exactly `0.5.10` and `0.9.4`; the native target must match exactly.
+  Core and lib must be exactly `0.5.10` and `0.9.3`; the native target must match exactly.
   Plugins whose published metadata incorrectly reports the plugin's own
   release as core/lib are rejected, not allowed through.
 * OCI metadata has no component schemas. Descriptors remain empty until actual
@@ -1543,17 +1648,13 @@ It is not positive signed-plugin, PostgreSQL CDC, or browser acceptance evidence
   Only source/bootstrap factories are supported. Schema JSON must be an object
   and is bounded; invalid schemas cause load failure, not a fabricated schema.
   The descriptor JSON preserves `kind`, `schema`, and `instantiable` field names.
-* The SDK's downloader reports signature failure without rejecting it. This
-  adapter explicitly rejects unsigned, tampered, and untrusted results both
-  before download and after the downloader returns.
+* The unmodified SDK's default registry configuration disables signature
+  verification. This proof of concept uses that configuration as-is.
 * The SDK's local-directory discovery opens binaries to inspect them, so this
-  adapter does **not** call it on unverified directories. Local catalogs are
-  exact administrator-configured binary mirrors of signed OCI releases. The
-  SDK's local install/copy operation is used only after verification, and both
-  downloaded and copied bytes must match the administrator's hash. Offline
-  detached-signature/local OCI-layout verification is unavailable upstream;
-  unsigned local-only installs are not supported. Cached discovery works
-  offline, but installation/loading still require online signature checks.
+  adapter does **not** use it to discover unchecked directories. Local catalogs
+  select exact configured files; the SDK's local install/copy operation is used
+  only after checking their pins. Downloaded and copied bytes must match the
+  configured hash. Local-only installation and cached loading work offline.
 * The SDK's metadata fetch currently pulls artifact layers, including the
   binary. These operations are not a lightweight registry index service.
   Native policy caps configured releases, schemas and binary file sizes; the
@@ -1597,26 +1698,21 @@ frontend/History/SDK workflow fixture now uses these admissions and real registr
 incarnations rather than a preconfigured native graph. Its public and native
 IDs/revisions deliberately differ. A real blocked TLS metadata fetch also proves
 poll/ack, feed dispatch, and subsequent output remain serviceable before and
-after the provisioning caller cancels; no registry trust check is bypassed.
+after the provisioning caller cancels; configured-catalog restrictions remain.
 These are not production reconciliation or PostgreSQL/browser verification.
 
-The public
-base's `Strict` policy rebuilds on configuration-hash read errors/mismatches
-and continues after source-checkpoint read errors
-([query startup](https://github.com/drasi-project/drasi-core/blob/207ef6f3c4cd12d854dbe512c9b670282f996284/lib/src/queries/manager.rs#L1824-L2055)).
-The development overlay and outer-host tests now reject missing/mismatched hashes,
-reset markers and corrupt outbox bytes while preserving persisted rows, outbox,
-source checkpoints, sequence/generation and the pending Watch handoff. A repaired
-hash permits recovery and contiguous next output without changing the incarnation.
-Interrupted first admission and missing control identity/definition also fail
-closed. Missing admission catalogs also fail closed. The native source preparer's retained tests reject checksum failures,
-modified source, staged changes and untracked files. Concurrent PostgreSQL
+Stock `Strict` recovery is not mutation-free existing-only admission. The host
+retains pending Watch handoffs and refuses incompatible output generations or
+gaps, rather than assuming that every successful SDK startup preserves its old
+output. Missing control identity/definition or admission catalogs fail closed.
+The dependency-integrity tests reject non-registry Drasi packages, modified
+crate archives, modified source bytes and extra source files. Concurrent PostgreSQL
 bootstrap/feedback and complete production graph-reconciliation crash recovery remain
 required gates before exposing production graph mutation.
 
 Plugin tests cover configured-catalog isolation and request-field rejection,
-untrusted/unsigned/tampered signature decisions, each compatibility boundary,
-cache corruption and changed trust policy, offline cache observations, and a
+unsigned local installation, compatibility boundaries, cache corruption,
+offline cache observations, and a
 real SDK-built descriptor fixture loaded through the resident native loader.
 The same fixture constructs real Source and bootstrap instances across the
 plugin ABI. It verifies an empty positional bootstrap, configuration properties,
@@ -1624,8 +1720,8 @@ and a managed Source remaining stopped while the actual SDK starts. Explicit
 Source start/stop and joined SDK shutdown are also exercised. The factory forwards
 the requested auto-start setting; automatic startup retains its existing setting.
 This fixture is not a CDC source or plugin-backed Graph reconciliation proof.
-Its cache receipts are explicitly synthetic test data: it proves loader/factory
-behavior, **not** successful keyless OCI verification.
+The unsigned fixture additionally exercises normal configured local install/load
+and content-tamper refusal, without seeded cache receipts or signer evidence.
 
 Credential tests load two independently linked fixture libraries through the
 actual loader, interleave two namespace/graph constructions, and exercise delayed
@@ -1636,18 +1732,17 @@ literal `${...}` remain literal. Deliberate premature revocation makes a later
 start fail. A diagnostic fixture emits a resolved value and capability through
 both log and lifecycle callbacks; the redacted per-instance path preserves the
 host identity/error status without retaining that text. The SDK's own tests also
-exercise forged callback identities. `tests/test-sdk-diagnostics.py` runs those
-SDK checks and all-target SDK lint in a temporary verified checkout, never in the
-immutable dependency cache. This is primitive-level coverage, not provider
+exercise forged callback identities. `tests/test-sdk-diagnostics.py` rebuilds the two native diagnostic fixture
+libraries and runs the exactly selected native callback/loader regression,
+verifying registry dependency integrity before and after the run. This is
+primitive-level coverage, not provider
 authorization, safe arbitrary-plugin teardown or persisted Graph continuity.
 
-For real signed PostgreSQL source and **separate** bootstrap artifacts, put
-administrator-selected compatible pins in a Config JSON file under the ignored
-`.verification` directory, with catalogs/trust only (no startup plugins,
-sources, or queries), build the host, then run:
+For real PostgreSQL Source/bootstrap plugins, use a configured catalog with
+compatible immutable pins, build the host, then run:
 
 ```sh
-TEMPORAL_DRASI_PLUGIN_CONFIG="$PWD/native/drasi/.verification/signed-plugins.json" \
+TEMPORAL_DRASI_PLUGIN_CONFIG=/absolute/prepared-postgres-bundle/catalog.json \
     bash native/drasi/verify-plugins.sh
 ```
 
@@ -1657,75 +1752,71 @@ not bypass verification or make a database connection. Missing configuration
 makes the script fail; directly running the integration test without it reports
 a skip, not a verified installation.
 
-### Public signed PostgreSQL database fixture
+### Configured PostgreSQL database fixture
 
 ```sh
-bash native/drasi/verify-postgres.sh
+TEMPORAL_DRASI_PLUGIN_CONFIG=/absolute/prepared-postgres-bundle/catalog.json \
+  bash native/drasi/verify-postgres.sh
 ```
 
-The default administrator test catalog is
+Without an explicit configuration, the verifier uses
 [`tests/postgres-catalog.json`](tests/postgres-catalog.json). Its immutable
 Darwin arm64 releases are the public
 [PostgreSQL source 0.2.12](https://github.com/drasi-project/drasi-core/releases/tag/drasi-source-postgres-v0.2.12)
 and separate
 [PostgreSQL bootstrap 0.2.15](https://github.com/drasi-project/drasi-core/releases/tag/drasi-bootstrap-postgres-v0.2.15).
-Manifest/binary digests and the exact trusted keyless issuer/subject are confined
-to this fixture, not generic runtime code. Both use issuer
-`https://token.actions.githubusercontent.com` and subject
-`https://github.com/drasi-project/drasi-core/.github/workflows/publish-plugins.yml@refs/heads/main`.
-The [public publishing workflow](https://github.com/drasi-project/drasi-core/blob/207ef6f3c4cd12d854dbe512c9b670282f996284/.github/workflows/publish-plugins.yml)
-documents their signing path.
+Manifest/binary digests are confined to this fixture, not generic runtime code.
+These particular binaries have incompatible exported metadata and remain a
+negative compatibility fixture, not the positive PostgreSQL configuration.
 
-The script reproduces the public manifest, metadata, tag binding, and advertised
-certificate provenance. Certificate inspection is **not** cryptographic
-verification; the native SDK separately performs actual signature verification,
-trusted-identity matching, digest verification, installation, and load checks.
-The script starts its own digest-pinned PostgreSQL 17 container with logical
+The script inspects public manifest/metadata pins or the configured local
+bundle, then performs actual digest, installation, and load checks.
+To also reproduce the retained upstream release-tag binding, run
+`tests/inspect-postgres-catalog.py` with `--verify-release-tags`; that convention
+is not required of configured local artifacts.
+After plugins load, the script starts its own digest-pinned PostgreSQL 17 container with logical
 replication, seeds matching/nonmatching rows, and creates a publication. It
 attempts both plugins independently. If both load, the Go/C ABI test constructs a
 generation with the real source and separate bootstrap, checks initial query
 output `{"name":"initial","doubled":24}`, executes an SQL update, and requires
 actual output `{"name":"initial","doubled":36}` at a later sequence.
 `TEMPORAL_DRASI_PLUGIN_CONFIG` can select an administrator-reviewed replacement
-catalog; it cannot bypass runtime trust or compatibility checks. The script
+catalog; it cannot bypass content or compatibility checks. The script
 removes only its own container and writes evidence under `.verification`.
 
-This retained catalog belongs to the previous SDK 0.11.3/ABI 0.14 family. The
-current SDK 0.12/ABI 0.15 host rejects its advertised compatibility before load.
-It is a negative fixture, not a compatible source/bootstrap pair.
+This retained catalog uses the selected SDK 0.11.3/ABI 0.14 release family.
+Release-family alignment does not prove that the binaries' exported metadata,
+schemas, loading, database behavior or recovery satisfy the host contract.
 
-**Historical upstream blocker:** executing this command on the previous Darwin
-arm64 host verified
-both public artifacts' signatures and installed their pinned bytes, but exited
-nonzero before initialization because both binaries contradict their signed OCI
-metadata:
+**Public artifact incompatibility:** the retained public Darwin arm64 binaries
+contradict their OCI metadata:
 
-| Artifact | Signed core / lib | Embedded core / lib | Embedded ABI |
+| Artifact | Advertised core / lib | Embedded core / lib | Embedded ABI |
 | --- | --- | --- | --- |
 | Source 0.2.12 | `0.5.10` / `0.9.3` | `0.2.12` / `0.2.12` | `0.14.0` |
 | Bootstrap 0.2.15 | `0.5.10` / `0.9.3` | `0.2.15` / `0.2.15` | `0.14.0` |
 
 Both therefore returned `incompatible plugin binary metadata`, not `loaded`.
+The published 0.9.3/SDK 0.11.3 host reproduces the source refusal: its required
+ABI and the binary ABI both equal 0.14.0, but the embedded core/lib values are
+wrong. Switching the host release family or removing signature requirements
+does not repair that artifact.
 The published release tag commit
 `22125bf1d66062533b832a166fe4a51079a23d6e` contains the cause in the
 [source export](https://github.com/drasi-project/drasi-core/blob/22125bf1d66062533b832a166fe4a51079a23d6e/components/sources/postgres/src/lib.rs)
 and [bootstrap export](https://github.com/drasi-project/drasi-core/blob/22125bf1d66062533b832a166fe4a51079a23d6e/components/bootstrappers/postgres/src/lib.rs):
 both pass their own `CARGO_PKG_VERSION` as the core and lib versions.
 The [SDK export macro](https://github.com/drasi-project/drasi-core/blob/207ef6f3c4cd12d854dbe512c9b670282f996284/components/plugin-sdk/src/lib.rs)
-copies those values into binary metadata. Upstream must publish corrected,
-signed artifacts; administrators must review and update their immutable pins.
-No compatibility override or unsigned rebuild is used. **Signed-plugin database
-bootstrap and SQL-mutation query output remain unverified** because these
-artifacts cannot safely initialize. The separate `test-sdk-recovery.py --postgres`
-checks exercise those data paths through the SDK libraries directly, without
-loading these incompatible artifacts.
+copies those values into binary metadata. The Temporal-owned packaging adapter
+exports the actual linked versions while using the unchanged released Source
+and bootstrap crates. Its prepared local bundle exercises normal install/load
+without requiring an upstream change, publication, or signing.
 
-A live check of both public OCI repositories also found distinct
-`drasi-nightly-test-darwin-arm64` source/bootstrap artifacts. The source candidate
-was rejected by the actual SDK installer as unsigned under the unchanged trusted
-issuer/subject policy. It therefore did not provide a trusted replacement pair.
-The reviewed release platform tags still named the immutable artifacts above;
-this check was not an exhaustive audit of other registries or platforms.
+A historical nightly Source attempt was refused by the former signing policy.
+After removing that policy, its actual unsigned bytes installed successfully
+but loading still failed because its embedded core/lib values were `0.2.12`.
+Neither this result nor the stable catalog classifies all GHCR versions or
+platforms. Mutable tags must be selected by their actual immutable digest.
 
 These PostgreSQL checks do not prove plugin-backed production Graph recovery or
 browser-to-workflow behavior. The separate built-in-source Watch-role and

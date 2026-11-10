@@ -198,7 +198,7 @@ func WithSearchAttributesMapper(m searchattribute.Mapper) ServerOption {
 	})
 }
 
-// WithDrasiPluginPolicy configures administrator-reviewed catalogs, signing trust,
+// WithDrasiPluginPolicy configures administrator-reviewed catalogs,
 // startup pins and managed descriptor pairs for the opt-in Watch role.
 func WithDrasiPluginPolicy(policy watch.PluginPolicy) ServerOption {
 	return applyFunc(func(s *serverOptions) {

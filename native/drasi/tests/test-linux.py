@@ -86,7 +86,7 @@ def main():
                 raise RuntimeError(f"Linux verifier did not complete successfully: {outcome}")
         finally:
             subprocess.run(["docker", "rm", "--force", container], check=True)
-    print("Linux native verifier passed; signed PostgreSQL and browser acceptance remain separate")
+    print("Linux native verifier passed; configured PostgreSQL and browser acceptance remain separate")
 
 
 if __name__ == "__main__":

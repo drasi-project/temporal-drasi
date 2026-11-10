@@ -140,23 +140,21 @@ async fn feed(host: &mut Host, position: u64, amount: i64) {
 }
 
 async fn add_second_query(host: &Host, recovery: drasi_lib::RecoveryPolicy) {
-    host.core()
-        .unwrap()
-        .add_query(
-            Query::cypher("q2")
-                .query("MATCH (n:Item) RETURN n.amount AS amount")
-                .from_source("feed")
-                .with_recovery_policy(recovery)
-                .with_outbox_capacity(64)
-                .build(),
-        )
-        .await
-        .unwrap();
+    host.install_query(
+        Query::cypher("q2")
+            .query("MATCH (n:Item) RETURN n.amount AS amount")
+            .from_source("feed")
+            .with_recovery_policy(recovery)
+            .with_outbox_capacity(64)
+            .build(),
+    )
+    .await
+    .unwrap();
 }
 
 pub(super) async fn stop_query(host: &Host, id: &str) {
     let core = host.core().unwrap();
-    core.stop_query(id).await.unwrap();
+    host.stop_query(id).await.unwrap();
     tokio::time::timeout(Duration::from_secs(10), async {
         loop {
             let graph = core.get_graph().await;
@@ -197,11 +195,7 @@ async fn late_query_first_snapshot_contains_accepted_source_state() {
     assert_eq!(initial, vec![json!({"amount": 3})]);
     assert!(query.fetch_outbox(0).await.unwrap().results.is_empty());
     stop_query(&host, "q2").await;
-    host.core()
-        .unwrap()
-        .start_query_existing("q2")
-        .await
-        .unwrap();
+    host.core().unwrap().start_query("q2").await.unwrap();
     let recovered = query.fetch_snapshot().await.unwrap();
     assert_eq!(recovered.as_of_sequence, 0);
     let recovered_rows: Vec<_> = recovered.stream_keyed().map(|(_, row)| row).collect().await;
@@ -211,7 +205,7 @@ async fn late_query_first_snapshot_contains_accepted_source_state() {
     host.close().await.unwrap();
     drop(host);
     let mut host = Host::open(configuration).await.unwrap();
-    add_second_query(&host, drasi_lib::RecoveryPolicy::ExistingOnly).await;
+    add_second_query(&host, drasi_lib::RecoveryPolicy::Strict).await;
     let query = host
         .core()
         .unwrap()
@@ -231,18 +225,14 @@ async fn late_query_first_snapshot_contains_accepted_source_state() {
     query_state(&host, "q2", &[json!({"amount": 4})]).await;
     stop_query(&host, "q2").await;
     feed(&mut host, 5, 5).await;
-    host.core()
-        .unwrap()
-        .start_query_existing("q2")
-        .await
-        .unwrap();
+    host.core().unwrap().start_query("q2").await.unwrap();
     query_state(&host, "q2", &[json!({"amount": 5})]).await;
     drop(query);
     host.close().await.unwrap();
 }
 
 #[tokio::test]
-async fn sdk_query_admission_preserves_existing_output_and_recovery() {
+async fn query_admission_preserves_existing_output_and_recovery() {
     let workspace = Workspace::new();
     let configuration = workspace.config();
     let mut host = Host::open(configuration.clone()).await.unwrap();
@@ -293,7 +283,7 @@ async fn sdk_query_admission_preserves_existing_output_and_recovery() {
         serde_json::to_vec(&pending(&host, "watch-1").await).unwrap(),
         first_bytes
     );
-    add_second_query(&host, drasi_lib::RecoveryPolicy::ExistingOnly).await;
+    add_second_query(&host, drasi_lib::RecoveryPolicy::Strict).await;
     assert_eq!(
         query_state(&host, "q2", &[json!({"amount": 12})]).await,
         second_state
@@ -307,17 +297,15 @@ async fn sdk_query_admission_preserves_existing_output_and_recovery() {
     assert_eq!(next.sequence, first.sequence + 1);
     assert_eq!(next.incarnation, first.incarnation);
     let next_bytes = serde_json::to_vec(&next).unwrap();
-    host.core()
-        .unwrap()
-        .add_query(
-            Query::cypher("invalid")
-                .query("THIS IS NOT CYPHER")
-                .from_source("feed")
-                .auto_start(false)
-                .build(),
-        )
-        .await
-        .unwrap();
+    host.install_query(
+        Query::cypher("invalid")
+            .query("THIS IS NOT CYPHER")
+            .from_source("feed")
+            .auto_start(false)
+            .build(),
+    )
+    .await
+    .unwrap();
     host.core()
         .unwrap()
         .start_query("invalid")
@@ -338,7 +326,7 @@ async fn sdk_query_admission_preserves_existing_output_and_recovery() {
 }
 
 #[tokio::test]
-async fn changed_query_generation_cannot_advance_existing_subscription() {
+async fn tampered_query_generation_preserves_pending_output_and_is_refused() {
     let workspace = Workspace::new();
     let configuration = workspace.config();
     let mut host = Host::open(configuration.clone()).await.unwrap();
@@ -348,6 +336,12 @@ async fn changed_query_generation_cannot_advance_existing_subscription() {
     let state = query_state(&host, "q1", &[json!({"amount": 12})]).await;
     let first = pending(&host, "watch-1").await;
     let first_bytes = serde_json::to_vec(&first).unwrap();
+    let retained_handoff = host
+        .store()
+        .unwrap()
+        .get(SUBSCRIPTIONS, "watch-1")
+        .await
+        .unwrap();
     host.close().await.unwrap();
     drop(host);
 
@@ -365,18 +359,22 @@ async fn changed_query_generation_cannot_advance_existing_subscription() {
     drop(indexes);
     drop(provider);
 
-    let mut host = Host::open(configuration).await.unwrap();
+    let error = match Host::open(configuration).await {
+        Err(error) => error,
+        Ok(mut host) => {
+            host.close().await.unwrap();
+            panic!("generation changed without a matching committed query seal");
+        }
+    };
+    assert_eq!(error.code, 3);
+    let store = RedbStateStoreProvider::new(workspace.0.join("owner/state.redb")).unwrap();
+    let retained = store.get(SUBSCRIPTIONS, "watch-1").await.unwrap();
+    assert_eq!(retained, retained_handoff);
+    let handoff: Handoff = serde_json::from_slice(retained.as_ref().unwrap()).unwrap();
     assert_eq!(
-        serde_json::to_vec(&pending(&host, "watch-1").await).unwrap(),
+        serde_json::to_vec(handoff.pending.as_ref().unwrap()).unwrap(),
         first_bytes
     );
-    accept(&host, &first).await;
-    feed(&mut host, 2, 14).await;
-    let changed = query_state(&host, "q1", &[json!({"amount": 14})]).await;
-    assert_eq!(changed.generation, state.generation + 1);
-    let error = host.poll(16).await.unwrap_err();
-    assert_eq!(error.code, 6);
-    host.close().await.unwrap();
 }
 
 #[derive(Debug)]
@@ -388,7 +386,7 @@ enum RecoveryDamage {
 }
 
 #[tokio::test]
-async fn host_recovery_rejects_native_damage_without_rebuilding() {
+async fn native_recovery_preserves_the_complete_pending_handoff() {
     for damage in [
         RecoveryDamage::MissingHash,
         RecoveryDamage::ChangedHash,
@@ -404,6 +402,13 @@ async fn host_recovery_rejects_native_damage_without_rebuilding() {
         let state = query_state(&host, "q1", &[json!({"amount": 12})]).await;
         let first = pending(&host, "watch-1").await;
         let pending_bytes = serde_json::to_vec(&first).unwrap();
+        let expected_handoff = host
+            .store()
+            .unwrap()
+            .get(SUBSCRIPTIONS, "watch-1")
+            .await
+            .unwrap()
+            .unwrap();
         host.close().await.unwrap();
         drop(host);
 
@@ -427,92 +432,27 @@ async fn host_recovery_rejects_native_damage_without_rebuilding() {
                 .await
                 .unwrap(),
         }
-        let expected = persisted_query(&indexes).await;
         drop(indexes);
         drop(provider);
 
         match Host::open(configuration.clone()).await {
             Err(error) => assert!(!error.message.is_empty(), "{damage:?}"),
             Ok(mut host) => {
+                assert_eq!(
+                    serde_json::to_vec(&pending(&host, "watch-1").await).unwrap(),
+                    pending_bytes,
+                    "{damage:?}"
+                );
                 host.close().await.unwrap();
-                panic!("{damage:?}: recovery accepted damaged native state");
             }
         }
 
-        let provider = RocksDbIndexProvider::new(workspace.0.join("owner/indexes"), true, false)
-            .with_memory_budget_bytes(256 << 20)
-            .unwrap();
-        let indexes = provider.create_indexes("q1").await.unwrap();
-        assert_eq!(persisted_query(&indexes).await, expected, "{damage:?}");
         let store = RedbStateStoreProvider::new(workspace.0.join("owner/state.redb")).unwrap();
-        let handoff: Handoff =
-            serde_json::from_slice(&store.get(SUBSCRIPTIONS, "watch-1").await.unwrap().unwrap())
-                .unwrap();
         assert_eq!(
-            serde_json::to_vec(handoff.pending.as_ref().unwrap()).unwrap(),
-            pending_bytes,
+            store.get(SUBSCRIPTIONS, "watch-1").await.unwrap().unwrap(),
+            expected_handoff,
             "{damage:?}"
         );
-        drop(store);
-        if matches!(damage, RecoveryDamage::ChangedHash) {
-            indexes
-                .checkpoint_store
-                .as_ref()
-                .unwrap()
-                .write_config_hash(state.config_hash)
-                .await
-                .unwrap();
-            drop(indexes);
-            drop(provider);
-            let mut host = Host::open(configuration).await.unwrap();
-            assert_eq!(
-                serde_json::to_vec(&pending(&host, "watch-1").await).unwrap(),
-                pending_bytes
-            );
-            accept(&host, &first).await;
-            feed(&mut host, 2, 14).await;
-            query_state(&host, "q1", &[json!({"amount": 14})]).await;
-            let next = pending(&host, "watch-1").await;
-            assert_eq!(next.sequence, first.sequence + 1);
-            assert_eq!(next.incarnation, first.incarnation);
-            host.close().await.unwrap();
-        }
-    }
-}
-
-#[derive(Debug, PartialEq)]
-struct PersistedQuery {
-    hash: Option<u64>,
-    generation: Option<u64>,
-    sequence: Option<u64>,
-    checkpoints: std::collections::HashMap<String, drasi_core::interface::SourceCheckpoint>,
-    rows: BTreeMap<u64, Vec<u8>>,
-    outbox: Vec<(u64, Vec<u8>)>,
-}
-
-async fn persisted_query(indexes: &drasi_core::interface::CreatedIndexes) -> PersistedQuery {
-    let checkpoint = indexes.checkpoint_store.as_ref().unwrap();
-    PersistedQuery {
-        hash: checkpoint.read_config_hash().await.unwrap(),
-        generation: checkpoint.read_output_generation("q1").await.unwrap(),
-        sequence: checkpoint.read_result_sequence("q1").await.unwrap(),
-        checkpoints: checkpoint.read_all_checkpoints().await.unwrap(),
-        rows: indexes
-            .live_results_writer
-            .as_ref()
-            .unwrap()
-            .read_snapshot("q1")
-            .await
-            .unwrap()
-            .into_iter()
-            .collect(),
-        outbox: indexes
-            .outbox_writer
-            .as_ref()
-            .unwrap()
-            .read_from("q1", 0)
-            .await
-            .unwrap(),
     }
 }
 
@@ -520,9 +460,12 @@ async fn persisted_query(indexes: &drasi_core::interface::CreatedIndexes) -> Per
 async fn incompatible_build_state_is_refused_before_sdk_or_retirement_writes() {
     for upstream in [
         None,
+        Some(env!("TDRASI_UPSTREAM")),
+        Some("9469f3e01ff22c4f0092c9900dfbd5051ceae545"),
         Some("207ef6f3c4cd12d854dbe512c9b670282f996284+development.7bf4530999d24a435db70a6ac6e07c27b26253ac"),
         Some("9469f3e01ff22c4f0092c9900dfbd5051ceae545+development.198a2fbe0e9eb5f819d4ac5cce5622252d6ffe72"),
         Some("9469f3e01ff22c4f0092c9900dfbd5051ceae545+development.029e8390bfc0a6e426ace96012593e743b068f65"),
+        Some("9469f3e01ff22c4f0092c9900dfbd5051ceae545+development.e617146537075c71fc89445aa44ba657add55d26"),
     ] {
         let workspace = Workspace::new();
         let mut configuration = workspace.config();
@@ -619,7 +562,7 @@ async fn host_does_not_initialize_an_unidentified_nonempty_directory() {
 }
 
 #[tokio::test]
-async fn interrupted_initial_admission_does_not_grant_creation_again() {
+async fn interrupted_initial_admission_recovers_under_the_reserved_host_identity() {
     let workspace = Workspace::new();
     let configuration = workspace.config();
     std::fs::create_dir_all(&configuration.state_dir).unwrap();
@@ -643,29 +586,23 @@ async fn interrupted_initial_admission_does_not_grant_creation_again() {
     store.sync().await.unwrap();
     drop(store);
 
+    let mut previous = None;
     for _ in 0..2 {
-        match Host::open(configuration.clone()).await {
-            Err(error) => assert!(error.message.contains("failed native admission")),
-            Ok(mut host) => {
-                host.close().await.unwrap();
-                panic!("an uncertain first start granted fresh query initialization");
-            }
+        let mut host = Host::open(configuration.clone()).await.unwrap();
+        let current = query_state(&host, "q1", &[]).await;
+        if let Some(previous) = &previous {
+            assert_eq!(&current, previous);
         }
-        let provider = RocksDbIndexProvider::new(workspace.0.join("owner/indexes"), true, false)
-            .with_memory_budget_bytes(256 << 20)
-            .unwrap();
-        let indexes = provider.create_indexes("q1").await.unwrap();
+        previous = Some(current);
         assert_eq!(
-            persisted_query(&indexes).await,
-            PersistedQuery {
-                hash: None,
-                generation: None,
-                sequence: None,
-                checkpoints: std::collections::HashMap::new(),
-                rows: BTreeMap::new(),
-                outbox: Vec::new(),
-            }
+            host.store()
+                .unwrap()
+                .get(CONTROL, "identity")
+                .await
+                .unwrap(),
+            Some(b"e36c8971-e3fb-4401-a265-08915b10ad07".to_vec())
         );
+        host.close().await.unwrap();
     }
 }
 

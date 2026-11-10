@@ -79,7 +79,7 @@ fn public_resource_ids_do_not_use_native_path_identifier_rules() {
 }
 
 #[tokio::test]
-async fn admission_crash_cuts_do_not_regrant_consumed_creation() {
+async fn admission_crash_cuts_recover_the_same_lifetime_and_preserve_other_output() {
     for consumed in [false, true] {
         let workspace = Workspace::new();
         let mut config = workspace.config();
@@ -119,18 +119,14 @@ async fn admission_crash_cuts_do_not_regrant_consumed_creation() {
             serde_json::to_vec(&pending(&host, "watch").await).unwrap(),
             bytes
         );
-        let admitted = admit(&host, &candidate).await;
-        if consumed {
-            assert!(admitted
-                .unwrap_err()
-                .message
-                .contains("existing-state recovery"));
-        } else {
-            assert_eq!(admitted.unwrap()["native_id"], candidate_id);
-            query_state(&host, &candidate_id, &[json!({"amount": 12})]).await;
-        }
+        let admitted = admit(&host, &candidate).await.unwrap();
+        assert_eq!(admitted["native_id"], candidate_id);
+        let candidate_state = query_state(&host, &candidate_id, &[json!({"amount": 12})]).await;
         feed_source(&host, source_id, 2, 14).await;
         query_state(&host, healthy_id, &[json!({"amount": 14})]).await;
+        let candidate_next = query_state(&host, &candidate_id, &[json!({"amount": 14})]).await;
+        assert_eq!(candidate_next.generation, candidate_state.generation);
+        assert_eq!(candidate_next.sequence, candidate_state.sequence + 1);
         assert_eq!(
             serde_json::to_vec(&pending(&host, "watch").await).unwrap(),
             bytes
@@ -141,24 +137,6 @@ async fn admission_crash_cuts_do_not_regrant_consumed_creation() {
         assert_eq!(next.incarnation, output.incarnation);
         host.close().await.unwrap();
         drop(host);
-        if consumed {
-            use drasi_core::interface::IndexBackendPlugin;
-            let provider =
-                RocksDbIndexProvider::new(workspace.0.join("owner/indexes"), true, false)
-                    .with_memory_budget_bytes(256 << 20)
-                    .unwrap();
-            let indexes = provider.create_indexes(&candidate_id).await.unwrap();
-            let checkpoints = indexes.checkpoint_store.as_ref().unwrap();
-            assert_eq!(checkpoints.read_config_hash().await.unwrap(), None);
-            assert_eq!(
-                checkpoints
-                    .read_output_generation(&candidate_id)
-                    .await
-                    .unwrap(),
-                None
-            );
-            assert!(checkpoints.read_all_checkpoints().await.unwrap().is_empty());
-        }
     }
 }
 

@@ -1,48 +1,31 @@
 #!/usr/bin/env python3
-"""Run SDK-owned diagnostics checks without modifying verified source caches."""
+"""Verify Temporal's native diagnostic boundary against the unmodified SDK."""
 
 import runpy
 import subprocess
-import tempfile
 from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
+TEST = "plugins::tests::sdk_loader_is_idempotent_resident_and_returns_real_source_and_bootstrap_schemas"
 
 
 def main():
-    preparer = runpy.run_path(str(ROOT / "prepare-core.py"))
-    preparer["main"]()
-    with tempfile.TemporaryDirectory(
-        prefix="sdk-diagnostics-", dir=ROOT / ".verification"
-    ) as temporary:
-        source = Path(temporary) / "source"
-        subprocess.run(
-            ["git", "-c", "advice.detachedHead=false", "clone", "--quiet",
-             "--shared", str(preparer["SOURCE"]), str(source)],
-            check=True,
-        )
-        for name, _ in preparer["PATCHES"]:
-            subprocess.run(
-                ["git", "-C", str(source), "apply", "--index",
-                 str(ROOT / "patches" / name)],
-                check=True,
-            )
-        preparer["verify"](source)
-        common = [
-            "--manifest-path", str(source / "Cargo.toml"),
-            "--quiet", "--target-dir", str(ROOT / "target"),
-            "-p", "drasi-host-sdk",
-        ]
-        subprocess.run(
-            ["cargo", "test", *common, "--lib", "redacted_callback_tests"],
-            check=True,
-        )
-        subprocess.run(
-            ["cargo", "clippy", *common, "--all-targets", "--", "-D", "warnings"],
-            check=True,
-        )
-    preparer["verify"](preparer["SOURCE"])
+    verifier = runpy.run_path(str(ROOT / "verify-dependencies.py"))
+    verifier["dependencies"]()
+    common = ["--manifest-path", str(ROOT / "Cargo.toml"), "--quiet", "--locked"]
+    subprocess.run(
+        ["cargo", "build", *common, "-p", "temporal-drasi-test-plugin",
+         "-p", "temporal-drasi-other-test-plugin"],
+        check=True,
+    )
+    command = ["cargo", "test", *common, "--lib", "--", "--exact", TEST, "--test-threads=1"]
+    listing = subprocess.check_output([*command, "--list"], text=True)
+    selected = {line.removesuffix(": test") for line in listing.splitlines() if line.endswith(": test")}
+    if selected != {TEST}:
+        raise RuntimeError(f"Native diagnostics test selection is incomplete: {sorted(selected)}")
+    subprocess.run(command, check=True)
+    verifier["dependencies"]()
 
 
 if __name__ == "__main__":

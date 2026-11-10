@@ -102,7 +102,11 @@ func (h *frontendHandler) GetCapabilities(ctx context.Context, request *contract
 		} else {
 			result.QueryLanguages, result.StateStores = capabilities.QueryLanguages, capabilities.StateStores
 			result.TemporalSource, result.Once = capabilities.TemporalSource, capabilities.Once
+			result.ExternalSources = capabilities.ExternalSources
 			result.Message = "Native compilation is available; query preview and external sources are not configured"
+			if result.ExternalSources {
+				result.Message = "Native compilation and external sources are available; query preview is not configured"
+			}
 			methods = append(methods, contractpb.WatchService_ValidateQuery_FullMethodName)
 		}
 	}

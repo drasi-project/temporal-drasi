@@ -52,7 +52,6 @@ fn config(directory: String) -> Config {
         plugins: Vec::new(),
         catalogs: Vec::new(),
         managed_plugins: Vec::new(),
-        trust: Trust::default(),
         limits: Limits::default(),
     }
 }

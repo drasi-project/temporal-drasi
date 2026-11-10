@@ -13,12 +13,12 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestNativeSignedPostgresQueryFixture(t *testing.T) {
+func TestNativePostgresQueryFixture(t *testing.T) {
 	t.Parallel()
 	container := os.Getenv("TEMPORAL_DRASI_POSTGRES_CONTAINER")
 	configPath := os.Getenv("TEMPORAL_DRASI_PLUGIN_CONFIG")
 	if container == "" || configPath == "" {
-		t.Skip("run native/drasi/verify-postgres.sh for the public signed PostgreSQL fixture")
+		t.Skip("run native/drasi/verify-postgres.sh for the PostgreSQL fixture")
 	}
 	bytes, err := os.ReadFile(configPath)
 	require.NoError(t, err)
@@ -49,8 +49,7 @@ func TestNativeSignedPostgresQueryFixture(t *testing.T) {
 				require.NoError(t, err)
 				require.NotNil(t, installed.Installation)
 				require.Equal(t, PluginInstalled, installed.Installation.State)
-				require.NotNil(t, installed.Installation.VerifiedSignerIdentity)
-				t.Logf("native SDK verified signer: %+v", *installed.Installation.VerifiedSignerIdentity)
+				require.Nil(t, installed.Installation.VerifiedSignerIdentity)
 				loaded, err := catalogRuntime.Apply(t.Context(), LoadPluginCommand{Digest: discovered.Plugin.Digest})
 				if err != nil {
 					observed, observationErr := catalogRuntime.Apply(t.Context(), GetPluginInstallationCommand{
@@ -83,9 +82,8 @@ func TestNativeSignedPostgresQueryFixture(t *testing.T) {
 	if t.Failed() {
 		return
 	}
-	require.NotNil(t, source, "a real signed PostgreSQL source must be loaded")
-	require.NotNil(t, bootstrap, "a separate real signed PostgreSQL bootstrap must be loaded")
-	require.NotEqual(t, source.ID, bootstrap.ID)
+	require.NotNil(t, source, "a real PostgreSQL source must be loaded")
+	require.NotNil(t, bootstrap, "a real PostgreSQL bootstrap must be loaded")
 	require.NoError(t, catalogRuntime.Close(t.Context()))
 	port, err := strconv.Atoi(os.Getenv("TEMPORAL_DRASI_POSTGRES_PORT"))
 	require.NoError(t, err)
@@ -97,7 +95,10 @@ func TestNativeSignedPostgresQueryFixture(t *testing.T) {
 	require.NoError(t, err)
 	config.StateDir = filepath.Join(root, "query")
 	config.InstanceID = "postgres-query-verification"
-	config.Plugins = []Plugin{*source, *bootstrap}
+	config.Plugins = []Plugin{*source}
+	if source.ID != bootstrap.ID {
+		config.Plugins = append(config.Plugins, *bootstrap)
+	}
 	config.Sources = []Source{{
 		ID: "postgres", Kind: SourcePlugin, Plugin: source.ID, PluginKind: "postgres", Config: connection,
 		Bootstrap: &Bootstrap{Plugin: bootstrap.ID, Kind: "postgres", Config: connection},

@@ -13,8 +13,8 @@ mkdir -p "$native/lib" "$native/.verification/build" "$native/.verification/go"
 export TMPDIR="$native/.verification/build"
 export GOTMPDIR="$native/.verification/go"
 export RUST_LOG="${RUST_LOG:-error}"
-python3 "$native/prepare-core.py"
-python3 "$native/tests/test-prepare-core.py"
+python3 "$native/verify-dependencies.py"
+python3 "$native/tests/test-registry-dependencies.py"
 python3 "$native/tests/test-build-selection.py"
 python3 "$native/tests/test-sdk-recovery.py"
 CGO_ENABLED=0 go test -count=1 -tags test_dep ./cmd/tools/getproto ./cmd/tools/protogen
@@ -26,9 +26,19 @@ CGO_ENABLED=1 go test -count=1 -tags test_dep,integration \
     -run '^TestExecutionFeedPrimaryCommitAndReplay$' ./service/history/executionfeed
 
 bash "$native/tests/publish-library.sh"
-cargo fmt --manifest-path "$native/Cargo.toml" -- --check
+cargo fmt --manifest-path "$native/Cargo.toml" --all -- --check
 cargo build --manifest-path "$native/Cargo.toml" --locked \
     -p temporal-drasi-test-plugin -p temporal-drasi-other-test-plugin
+cargo build --manifest-path "$native/Cargo.toml" --locked --bin temporal-drasi-plugin-worker
+case "$(uname -s)" in
+    Darwin) suffix=dylib ;;
+    Linux) suffix=so ;;
+    *) echo "Unsupported native verification platform" >&2; exit 1 ;;
+esac
+TEMPORAL_DRASI_WORKER_TEST_BINARY="$native/target/debug/temporal-drasi-plugin-worker" \
+TEMPORAL_DRASI_WORKER_TEST_PLUGIN="$native/target/debug/libtemporal_drasi_test_plugin.$suffix" \
+cargo test --manifest-path "$native/Cargo.toml" --locked --lib plugins::worker::tests \
+    -- --include-ignored
 python3 "$native/tests/test-sdk-diagnostics.py"
 python3 - "$native/Cargo.toml" <<'PY'
 import subprocess
@@ -51,7 +61,7 @@ markers = [
     b"opaque-test-value",
 ]
 result = subprocess.run(
-    ["cargo", "test", "--manifest-path", sys.argv[1], "--locked"],
+    ["cargo", "test", "--manifest-path", sys.argv[1], "--locked", "--workspace"],
     stdout=subprocess.PIPE,
     stderr=subprocess.STDOUT,
     check=False,
@@ -65,7 +75,8 @@ if exposed:
     print("Native diagnostics exposed credential/capability test markers", file=sys.stderr)
 sys.exit(result.returncode or int(exposed))
 PY
-cargo clippy --manifest-path "$native/Cargo.toml" --locked --all-targets -- -D warnings
+cargo clippy --manifest-path "$native/Cargo.toml" --locked --workspace --all-targets -- -D warnings
+python3 "$native/tests/test-postgres-package.py"
 cargo build --manifest-path "$native/Cargo.toml" --locked
 
 case "$(uname -s)" in
@@ -73,6 +84,8 @@ case "$(uname -s)" in
     Linux) library=libtemporal_drasi.so ;;
     *) echo "Unsupported native verification platform" >&2; exit 1 ;;
 esac
+bash "$native/publish-library.sh" \
+    "$native/target/debug/temporal-drasi-plugin-worker" "$native/lib/temporal-drasi-plugin-worker"
 bash "$native/publish-library.sh" "$native/target/debug/$library" "$native/lib/$library"
 if [[ "$(uname -s)" == Darwin ]]; then
     otool -D "$native/lib/$library" | tail -n 1 | grep -Fx "@rpath/$library"

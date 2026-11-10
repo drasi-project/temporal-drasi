@@ -1,0 +1,24 @@
+[package]
+name = "temporal-drasi-postgres-plugin"
+version = "0.1.0"
+edition = "2021"
+publish = false
+build = "../../build.rs"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+drasi-lib = "=0.9.3"
+drasi-plugin-sdk = "=0.11.3"
+drasi-source-postgres = "=0.2.12"
+drasi-bootstrap-postgres = "=0.2.15"
+async-trait = "0.1"
+anyhow = "1"
+serde_json = "1"
+
+[build-dependencies]
+sha2 = "0.10"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt"] }

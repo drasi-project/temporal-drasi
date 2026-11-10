@@ -11,11 +11,11 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestNativeConfiguredSignedPostgresPlugins(t *testing.T) {
+func TestNativeConfiguredPostgresPlugins(t *testing.T) {
 	t.Parallel()
 	path := os.Getenv("TEMPORAL_DRASI_PLUGIN_CONFIG")
 	if path == "" {
-		t.Skip("requires administrator-configured signed PostgreSQL source and separate bootstrap catalog pins")
+		t.Skip("requires configured PostgreSQL source and bootstrap catalog pins")
 	}
 	file, err := os.Open(path)
 	require.NoError(t, err)
@@ -30,7 +30,7 @@ func TestNativeConfiguredSignedPostgresPlugins(t *testing.T) {
 	require.NotEmpty(t, config.Catalogs)
 	config.Version = ABIVersion
 	config.StateDir = filepath.Join(workspace(t), "owner")
-	config.InstanceID = "signed-plugin-fixture"
+	config.InstanceID = "plugin-fixture"
 	config.OwnerEpoch = 1
 	config.RestoreFrom = ""
 	runtime := openRuntime(t, config)
@@ -50,7 +50,7 @@ func TestNativeConfiguredSignedPostgresPlugins(t *testing.T) {
 			require.NoError(t, err)
 			require.NotNil(t, installed.Installation)
 			require.Equal(t, PluginInstalled, installed.Installation.State)
-			require.NotNil(t, installed.Installation.VerifiedSignerIdentity)
+			require.Nil(t, installed.Installation.VerifiedSignerIdentity)
 			repeated, err := runtime.Apply(t.Context(), InstallPluginCommand{Selection: selection, Digest: digest})
 			require.NoError(t, err)
 			require.Equal(t, installed.Installation.Plugin, repeated.Installation.Plugin)
@@ -59,7 +59,7 @@ func TestNativeConfiguredSignedPostgresPlugins(t *testing.T) {
 			require.NoError(t, err)
 			require.NotNil(t, loaded.Installation)
 			require.Equal(t, PluginLoaded, loaded.Installation.State)
-			require.NotNil(t, loaded.Installation.VerifiedSignerIdentity)
+			require.Nil(t, loaded.Installation.VerifiedSignerIdentity)
 			for _, descriptor := range loaded.Installation.Plugin.Descriptors {
 				require.NotEmpty(t, descriptor.ConfigurationSchema)
 				if descriptor.Component == "postgres" && descriptor.Category == PluginSource {
@@ -77,5 +77,4 @@ func TestNativeConfiguredSignedPostgresPlugins(t *testing.T) {
 	}
 	require.NotEmpty(t, sourceID, "no actual PostgreSQL source descriptor was loaded")
 	require.NotEmpty(t, bootstrapID, "no actual PostgreSQL bootstrap descriptor was loaded")
-	require.NotEqual(t, sourceID, bootstrapID, "the fixture requires separate source and bootstrap artifacts")
 }

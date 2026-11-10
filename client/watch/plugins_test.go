@@ -38,7 +38,7 @@ func pluginObservationFixture(now time.Time, member int, count int) (*watchservi
 		response.Observations = append(response.Observations, &watchservice.PluginObservation{
 			Digest: digest, Status: &contractpb.PluginHostStatus{
 				HostId: response.StorageHostId, State: contractpb.PluginHostState_PLUGIN_HOST_STATE_LOADED,
-				UpdatedAt: timestamppb.New(now), VerifiedSignerIdentity: "subject (issuer: issuer)",
+				UpdatedAt: timestamppb.New(now),
 			},
 		})
 	}
@@ -67,15 +67,12 @@ func TestPluginObservationStatuses(t *testing.T) {
 		{"missing status", func(r *watchservice.ObservePluginsResponse) { r.Observations[0].Status = nil }},
 		{"wrong status volume", func(r *watchservice.ObservePluginsResponse) { r.Observations[0].Status.HostId = "other" }},
 		{"unknown state", func(r *watchservice.ObservePluginsResponse) { r.Observations[0].Status.State = 99 }},
-		{"missing signer", func(r *watchservice.ObservePluginsResponse) { r.Observations[0].Status.VerifiedSignerIdentity = "" }},
+		{"invalid diagnostic", func(r *watchservice.ObservePluginsResponse) { r.Observations[0].Status.Message = "\xff" }},
+		{"invalid legacy metadata", func(r *watchservice.ObservePluginsResponse) { r.Observations[0].Status.VerifiedSignerIdentity = "\xff" }},
 		{"missing time", func(r *watchservice.ObservePluginsResponse) { r.Observations[0].Status.UpdatedAt = nil }},
 		{"invalid time", func(r *watchservice.ObservePluginsResponse) { r.Observations[0].Status.UpdatedAt.Seconds = 1 << 60 }},
 		{"stale time", func(r *watchservice.ObservePluginsResponse) { r.Observations[0].Status.UpdatedAt.Seconds -= 121 }},
 		{"future time", func(r *watchservice.ObservePluginsResponse) { r.Observations[0].Status.UpdatedAt.Seconds += 3 }},
-		{"unknown cannot claim signer", func(r *watchservice.ObservePluginsResponse) {
-			r.Observations[0].Status.State = contractpb.PluginHostState_PLUGIN_HOST_STATE_UNSPECIFIED
-			r.Observations[0].Status.Message = "not known"
-		}},
 		{"unknown requires diagnostic", func(r *watchservice.ObservePluginsResponse) {
 			r.Observations[0].Status = &contractpb.PluginHostStatus{HostId: r.StorageHostId}
 		}},
@@ -96,6 +93,23 @@ func TestPluginObservationStatuses(t *testing.T) {
 			require.Nil(t, statuses)
 		})
 	}
+	for _, state := range []contractpb.PluginHostState{
+		contractpb.PluginHostState_PLUGIN_HOST_STATE_VERIFIED,
+		contractpb.PluginHostState_PLUGIN_HOST_STATE_INSTALLED,
+		contractpb.PluginHostState_PLUGIN_HOST_STATE_LOADED,
+	} {
+		t.Run("unsigned "+state.String(), func(t *testing.T) {
+			t.Parallel()
+			now := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
+			request, response := pluginObservationFixture(now, 1, 1)
+			response.Observations[0].Status.State = state
+			statuses, err := pluginObservationStatuses(request, response, "member:7239", now)
+			require.NoError(t, err)
+			protorequire.ProtoSliceEqual(t, []*contractpb.PluginHostStatus{{
+				HostId: "member:7239", State: state, UpdatedAt: timestamppb.New(now),
+			}}, statuses)
+		})
+	}
 	t.Run("detached public identities and explicit unknown", func(t *testing.T) {
 		t.Parallel()
 		now := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
@@ -105,11 +119,11 @@ func TestPluginObservationStatuses(t *testing.T) {
 		require.NoError(t, err)
 		protorequire.ProtoSliceEqual(t, []*contractpb.PluginHostStatus{
 			{HostId: "member:7239", State: contractpb.PluginHostState_PLUGIN_HOST_STATE_LOADED,
-				UpdatedAt: timestamppb.New(now), VerifiedSignerIdentity: "subject (issuer: issuer)"},
+				UpdatedAt: timestamppb.New(now)},
 			{HostId: "member:7239", Message: "not yet observed"},
 		}, statuses)
-		statuses[0].VerifiedSignerIdentity = "changed"
-		require.Equal(t, "subject (issuer: issuer)", response.Observations[0].Status.VerifiedSignerIdentity)
+		statuses[0].Message = "changed"
+		require.Empty(t, response.Observations[0].Status.Message)
 		require.Equal(t, response.StorageHostId, response.Observations[0].Status.HostId)
 	})
 	t.Run("nil envelope", func(t *testing.T) {

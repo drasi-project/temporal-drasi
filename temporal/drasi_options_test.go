@@ -23,7 +23,6 @@ func TestDrasiServerOptionsDoNotReadCredentials(t *testing.T) {
 	t.Parallel()
 	reader := &drasiCredentialReader{}
 	policy := watch.PluginPolicy{
-		Trust: native.Trust{Identities: []native.Identity{{Issuer: "issuer", Subject: "subject"}}},
 		ManagedPlugins: []native.ManagedPluginPair{{
 			Source:    native.PluginComponentRef{Component: "source"},
 			Bootstrap: native.PluginComponentRef{Component: "bootstrap"},

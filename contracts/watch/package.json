@@ -17,12 +17,14 @@
     "scripts/*.py",
     "scripts/*.sh",
     "scripts/*.cjs",
+    "schema/*.json",
     "typescript/**/*.ts",
     "v1/*.go",
     "validation/*.go"
   ],
   "exports": {
-    "./v1": "./typescript/drasi/watch/v1/service.ts"
+    "./v1": "./typescript/drasi/watch/v1/service.ts",
+    "./temporal-execution-state": "./schema/temporal-execution-state.json"
   },
   "scripts": {
     "generate": "bash scripts/generate.sh",

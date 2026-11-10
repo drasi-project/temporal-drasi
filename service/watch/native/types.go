@@ -46,7 +46,6 @@ type Config struct {
 	Plugins        []Plugin            `json:"plugins,omitempty"`
 	Catalogs       []CatalogConfig     `json:"catalogs,omitempty"`
 	ManagedPlugins []ManagedPluginPair `json:"managed_plugins,omitempty"`
-	Trust          Trust               `json:"trust"`
 	Limits         *Limits             `json:"limits,omitempty"`
 }
 
@@ -265,7 +264,7 @@ type Plugin struct {
 }
 
 // CatalogConfig contains only server-configured, immutable releases.
-// Local mirrors still require verification against the pinned signed OCI artifact.
+// Local mirrors retain the same artifact and binary content pins.
 type CatalogConfig struct {
 	ID          string           `json:"id"`
 	DisplayName string           `json:"display_name"`
@@ -348,11 +347,6 @@ type PluginObservation struct {
 	Message                string           `json:"message"`
 	UpdatedAtUnixMS        uint64           `json:"updated_at_unix_ms"`
 	VerifiedSignerIdentity *Identity        `json:"verified_signer_identity"`
-}
-
-type Trust struct {
-	RegistryPrefixes []string   `json:"registry_prefixes,omitempty"`
-	Identities       []Identity `json:"identities,omitempty"`
 }
 
 type Identity struct {

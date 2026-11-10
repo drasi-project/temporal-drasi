@@ -9,11 +9,11 @@ import json
 import os
 from pathlib import Path
 import platform
+import runpy
 import shutil
 import subprocess
 import tarfile
 import tempfile
-import tomllib
 
 
 NATIVE = Path(__file__).resolve().parent
@@ -50,6 +50,8 @@ def main():
     environment.setdefault("CARGO_BUILD_JOBS", "2")
     if environment.get("CARGO_BUILD_TARGET"):
         parser.error("cross-target Cargo builds are unsupported by this package command")
+    if environment.get("CARGO_TARGET_DIR"):
+        parser.error("redirected Cargo target directories are unsupported by this package command")
     target = subprocess.check_output(
         ["go", "env", "-json", "GOOS", "GOARCH"], cwd=ROOT, env=environment, text=True
     )
@@ -70,6 +72,11 @@ def main():
         (bundle / "lib").mkdir()
         library = bundle / "lib" / library_name
         shutil.copy2(NATIVE / "target" / arguments.profile / library_name, library)
+        worker = bundle / "lib" / "temporal-drasi-plugin-worker"
+        shutil.copy2(
+            NATIVE / "target" / arguments.profile / "temporal-drasi-plugin-worker",
+            worker,
+        )
         server = bundle / "bin" / "temporal-server"
         subprocess.run(
             ["go", "build", "-trimpath", link_flags(), "-tags",
@@ -79,28 +86,31 @@ def main():
         )
         if digest(library) != digest(NATIVE / "lib" / library_name):
             raise RuntimeError("native library publication changed during packaging")
+        if digest(worker) != digest(NATIVE / "lib" / worker.name):
+            raise RuntimeError("native worker publication changed during packaging")
         probe = ctypes.CDLL(str(library))
         probe.temporal_drasi_v1_abi_version.restype = ctypes.c_uint32
         shutil.copyfile(ROOT / "LICENSE", bundle / "LICENSE")
         shutil.copyfile(NATIVE / "README.md", bundle / "README.md")
-        cargo = tomllib.loads((NATIVE / "Cargo.toml").read_text(encoding="utf-8"))
-        overlay = (NATIVE / cargo["patch"]["https://github.com/drasi-project/drasi-core"]["drasi-core"]["path"]).parent
-        shutil.copyfile(overlay / "LICENSE", bundle / "LICENSE.drasi-core")
+        verifier = runpy.run_path(str(NATIVE / "verify-dependencies.py"))
+        dependencies = verifier["dependencies"]()
+        if any(package["license"] != "Apache-2.0" for package in dependencies.values()):
+            raise ValueError("Drasi package licensing differs from the bundled Apache license")
+        shutil.copyfile(NATIVE / "LICENSE.drasi-core", bundle / "LICENSE.drasi-core")
         manifest = {
-            "format": 1,
+            "format": 2,
             "provenance": "unpublished-development-source-build",
             "profile": arguments.profile,
             "platform": target,
             "native_abi": probe.temporal_drasi_v1_abi_version(),
-            "drasi_base": cargo["dependencies"]["drasi-core"]["rev"],
-            "drasi_tree": overlay.name.removeprefix("drasi-core-"),
+            "drasi_source": "crates.io",
+            "drasi_dependencies": verifier["provenance"](dependencies),
             "cargo_manifest_sha256": digest(NATIVE / "Cargo.toml"),
             "cargo_lock_sha256": digest(NATIVE / "Cargo.lock"),
             "rustc_version": subprocess.check_output(
                 [environment.get("RUSTC", "rustc"), "--version", "--verbose"],
                 cwd=NATIVE, env=environment, text=True,
             ),
-            "patches": {path.name: digest(path) for path in sorted((NATIVE / "patches").glob("*.patch"))},
             "server_revision": subprocess.check_output(
                 ["git", "rev-parse", "HEAD"], cwd=ROOT, text=True
             ).strip(),

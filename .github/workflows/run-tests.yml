@@ -64,7 +64,7 @@ jobs:
           docker info > /dev/null
           python3 native/drasi/tests/test-sdk-recovery.py --postgres
 
-      - name: Verify native PostgreSQL libraries, not signed-plugin admission
+      - name: Verify native PostgreSQL libraries, not configured-plugin admission
         run: python3 native/drasi/tests/test-sdk-recovery.py --native-postgres
 
   drasi-go-modules:

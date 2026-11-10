@@ -150,15 +150,12 @@ func TestGraphPluginObservationsAndPoliciesAreDetached(t *testing.T) {
 	policy := PluginPolicy{
 		Preload:        []native.Plugin{{ID: "source"}},
 		Catalogs:       []native.CatalogConfig{{ID: "catalog", Plugins: []native.CatalogRelease{{Version: "1"}}}},
-		Trust:          native.Trust{RegistryPrefixes: []string{"registry"}, Identities: []native.Identity{{Issuer: "issuer", Subject: "subject"}}},
 		ManagedPlugins: []native.ManagedPluginPair{{Source: node.Definition.Recipe.(native.PluginSourceRecipe).Source.Plugin}},
 	}
 	original := clonePluginPolicy(policy)
 	clone := clonePluginPolicy(policy)
 	clone.Preload[0].ID = "changed"
 	clone.Catalogs[0].Plugins[0].Version = "changed"
-	clone.Trust.RegistryPrefixes[0] = "changed"
-	clone.Trust.Identities[0].Subject = "changed"
 	clone.ManagedPlugins[0].Source.Component = "changed"
 	require.Equal(t, original, policy)
 }

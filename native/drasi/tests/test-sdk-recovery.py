@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-"""Verify SDK recovery and PostgreSQL libraries without changing the source cache."""
+"""Verify published SDK recovery and PostgreSQL without changing registry sources."""
 
 import argparse
-import hashlib
 import json
 import os
 import runpy
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -16,8 +16,6 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-LOCK = ROOT / "tests" / "fixtures" / "drasi-core.Cargo.lock"
-LOCK_SHA256 = "fae0da19cfd0c227d9312beb2d668f93aaaf854472018fa28b334ba8af0699d1"
 TESTS = (
     "queries::e2e_checkpoint_tests",
     "queries::checkpoint_tests",
@@ -40,47 +38,48 @@ POSTGRES_TESTS = (
 NATIVE_POSTGRES_TEST = "plugins::postgres_tests::native_postgres_bootstrap_cdc_and_recovery"
 
 
-def native_postgres(checkout, env, temp):
+def native_postgres(env, temp, bundle=None):
     if sys.platform not in ("darwin", "linux"):
         raise RuntimeError("The native PostgreSQL library fixture requires macOS or Linux")
     env = dict(env, CARGO_PROFILE_DEV_STRIP="none")
-    regressions = {
-        "config_value::tests::canonical_schemas_include_typed_values_and_complete_reference_shapes",
-        "descriptor::tests::ssl_mode_references_preserve_the_resolved_policy_and_reject_invalid_values",
-    }
-    sdk_tests = [
-        "cargo", "test", "--quiet", "--manifest-path", str(checkout / "Cargo.toml"),
-        "--locked", "-p", "drasi-plugin-sdk", "-p", "drasi-bootstrap-postgres",
-        "--lib", "--", "--exact", *sorted(regressions),
-    ]
-    listing = subprocess.check_output([*sdk_tests, "--list"], env=env, text=True)
-    selected = {line.removesuffix(": test") for line in listing.splitlines() if line.endswith(": test")}
-    if selected != regressions:
-        raise RuntimeError(f"PostgreSQL schema/reference regressions are missing: {sorted(selected)}")
-    subprocess.run(sdk_tests, env=env, check=True)
     subprocess.run(
-        ["cargo", "clippy", "--quiet", "--manifest-path", str(checkout / "Cargo.toml"),
-         "--locked", "-p", "drasi-plugin-sdk", "-p", "drasi-source-postgres",
-         "-p", "drasi-bootstrap-postgres", "--all-targets", "--features",
-         "dynamic-plugin", "--", "-D", "warnings"],
+        ["cargo", "build", "--quiet", "--manifest-path", str(ROOT / "Cargo.toml"),
+         "--locked", "--bin", "temporal-drasi-plugin-worker"],
         env=env,
         check=True,
     )
     subprocess.run(
-        ["cargo", "build", "--quiet", "--manifest-path", str(checkout / "Cargo.toml"),
-         "--locked", "-p", "drasi-source-postgres", "-p", "drasi-bootstrap-postgres",
-         "--lib", "--features", "dynamic-plugin"],
+        ["cargo", "clippy", "--quiet", "--manifest-path", str(ROOT / "Cargo.toml"),
+         "--locked", "-p", "temporal-drasi-postgres-plugin", "--all-targets",
+         "--", "-D", "warnings"],
         env=env,
         check=True,
     )
-    suffix = ".dylib" if sys.platform == "darwin" else ".so"
+    subprocess.run(
+        ["cargo", "test", "--quiet", "--manifest-path", str(ROOT / "Cargo.toml"),
+         "--locked", "-p", "temporal-drasi-postgres-plugin", "--lib"],
+        env=env,
+        check=True,
+    )
+    if bundle is None:
+        subprocess.run(
+            ["cargo", "build", "--quiet", "--manifest-path", str(ROOT / "Cargo.toml"),
+             "--locked", "-p", "temporal-drasi-postgres-plugin", "--lib"],
+            env=env,
+            check=True,
+        )
+        suffix = ".dylib" if sys.platform == "darwin" else ".so"
+        path = ROOT / "target" / "debug" / f"libtemporal_drasi_postgres_plugin{suffix}"
+        version = tomllib.loads((ROOT / "plugins" / "postgres" / "Cargo.toml").read_text())["package"]["version"]
+    else:
+        package = runpy.run_path(str(ROOT / "plugins" / "postgres" / "prepare.py"))
+        path, metadata = package["prepared_library"](bundle)
+        version = metadata["version"]
     libraries = {}
-    for kind, directory in (("source", "sources"), ("bootstrap", "bootstrappers")):
-        manifest = tomllib.loads((checkout / "components" / directory / "postgres" / "Cargo.toml").read_text())
-        path = ROOT / "target" / "debug" / f"libdrasi_{kind}_postgres{suffix}"
+    for kind in ("source", "bootstrap"):
         if not path.is_file():
             raise RuntimeError(f"PostgreSQL {kind} library was not built")
-        libraries[kind] = {"path": str(path), "version": manifest["package"]["version"]}
+        libraries[kind] = {"path": str(path), "version": version}
     command = [
         "cargo", "test", "--quiet", "--manifest-path", str(ROOT / "Cargo.toml"),
         "--locked", "--lib", "--", "--ignored", "--exact", "--test-threads=1",
@@ -123,7 +122,6 @@ def native_postgres(checkout, env, temp):
 ALTER TABLE watch_items REPLICA IDENTITY FULL;
 INSERT INTO watch_items VALUES (1, 'initial', 12), (2, 'excluded', 3);
 CREATE PUBLICATION native_fixture_pub FOR TABLE watch_items;
-SELECT pg_create_logical_replication_slot('native_fixture_slot', 'pgoutput');
 """,
             text=True,
             check=True,
@@ -143,48 +141,67 @@ SELECT pg_create_logical_replication_slot('native_fixture_slot', 'pgoutput');
         subprocess.run(["docker", "rm", "--force", container], check=True, stdout=subprocess.DEVNULL)
 
 
+def published_source(packages, name, temporary):
+    source = Path(temporary) / "source"
+    shutil.copytree(packages[name]["path"], source)
+    workspace = Path(temporary)
+    manifest = (source / "Cargo.toml").read_text()
+    manifest = manifest.replace('[package]\n', '[package]\npublish = false\n', 1)
+    manifest = manifest.replace('path = "', 'path = "source/')
+    manifest += '\n[workspace]\nresolver = "2"\n'
+    for dependency in ("drasi-index-rocksdb",) if name == "drasi-lib" else ():
+        if f"[dev-dependencies.{dependency}]" in manifest:
+            raise RuntimeError("Published SDK now declares the retained test dependency; review the test harness")
+        manifest += f'\n[dev-dependencies.{dependency}]\nversion = "={packages[dependency]["version"]}"\n'
+    (workspace / "Cargo.toml").write_text(manifest)
+    return str(workspace / "Cargo.toml")
+
+
+def install_test_lock(name, temporary):
+    workspace = Path(temporary)
+    shutil.copyfile(ROOT / "tests/fixtures" / f"{name}.registry-tests.Cargo.lock", workspace / "Cargo.lock")
+    lock = tomllib.loads((workspace / "Cargo.lock").read_text())
+    for package in lock["package"]:
+        if package["name"].startswith("drasi-") and (
+            package.get("source") not in (None, "registry+https://github.com/rust-lang/crates.io-index")
+            or (package.get("source") is None and package["name"] != name)
+        ):
+            raise RuntimeError("Published SDK test lock contains a non-registry Drasi dependency")
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     group = parser.add_mutually_exclusive_group()
     group.add_argument(
         "--postgres",
         action="store_true",
-        help="Run real PostgreSQL SDK container tests, not signed-plugin or UI acceptance",
+        help="Run real PostgreSQL SDK container tests, not configured-plugin or UI acceptance",
     )
     group.add_argument(
         "--native-postgres",
         action="store_true",
         help="Test native bootstrap, CDC and cold recovery with unsigned test-only PostgreSQL libraries",
     )
+    parser.add_argument(
+        "--postgres-bundle", type=Path,
+        help="Use an actual prepared unsigned debug/release bundle for --native-postgres",
+    )
     args = parser.parse_args()
-    lock = LOCK.read_bytes()
-    if hashlib.sha256(lock).hexdigest() != LOCK_SHA256:
-        raise RuntimeError("SDK validation lock checksum does not match the pin")
-    subprocess.run([sys.executable, str(ROOT / "prepare-core.py")], check=True)
-    preparer = runpy.run_path(str(ROOT / "prepare-core.py"))
+    if args.postgres_bundle is not None and not args.native_postgres:
+        parser.error("--postgres-bundle requires --native-postgres")
+    verifier = runpy.run_path(str(ROOT / "verify-dependencies.py"))
+    packages = verifier["dependencies"]()
     (ROOT / ".verification").mkdir(exist_ok=True)
     env = dict(os.environ, CARGO_TARGET_DIR=str(ROOT / "target"))
     with tempfile.TemporaryDirectory(prefix="sdk-recovery-", dir=ROOT / ".verification") as temp:
-        checkout = Path(temp) / "source"
-        subprocess.run(
-            ["git", "-c", "advice.detachedHead=false", "clone", "--quiet", "--shared",
-             str(preparer["SOURCE"]), str(checkout)],
-            check=True,
-        )
-        for name, _ in preparer["PATCHES"]:
-            subprocess.run(
-                ["git", "-C", str(checkout), "apply", "--index", str(ROOT / "patches" / name)],
-                check=True,
-            )
-        preparer["verify"](checkout)
-        (checkout / "Cargo.lock").write_bytes(lock)
-        manifest = str(checkout / "lib" / "Cargo.toml")
         if args.native_postgres:
-            native_postgres(checkout, env, temp)
+            native_postgres(env, temp, args.postgres_bundle)
         elif args.postgres:
+            manifest = published_source(packages, "drasi-source-postgres", temp)
+            install_test_lock("drasi-source-postgres", temp)
             command = [
                 "cargo", "test", "--quiet", "--manifest-path", manifest, "--locked",
-                "-p", "drasi-source-postgres", "--test", "integration_tests",
+                "--test", "integration_tests",
                 "--", "--ignored", "--exact", "--test-threads=1", *POSTGRES_TESTS,
             ]
             listing = subprocess.check_output([*command, "--list"], env=env, text=True)
@@ -196,33 +213,25 @@ def main():
                 env=env,
                 check=True,
             )
-            subprocess.run(
-                ["cargo", "clippy", "--quiet", "--manifest-path", manifest, "--locked",
-                 "-p", "drasi-source-postgres", "-p", "drasi-bootstrap-postgres",
-                 "--all-targets", "--features", "dynamic-plugin", "--", "-D", "warnings"],
-                env=env,
-                check=True,
-            )
         else:
-            subprocess.run(
+            manifest = published_source(packages, "drasi-lib", temp)
+            install_test_lock("drasi-lib", temp)
+            command = (
                 ["cargo", "test", "--quiet", "--manifest-path", manifest, "--locked",
-                 "-p", "drasi-lib", "--lib", "--", *TESTS],
-                env=env,
-                check=True,
+                 "--lib", "--", *TESTS]
             )
-            subprocess.run(
-                ["cargo", "clippy", "--quiet", "--manifest-path", manifest, "--locked",
-                 "-p", "drasi-lib", "--all-targets", "--", "-D", "warnings"],
-                env=env,
-                check=True,
-            )
-    preparer["verify"](preparer["SOURCE"])
+            listing = subprocess.check_output([*command, "--list"], env=env, text=True)
+            for prefix in TESTS:
+                if not any(line.startswith(prefix + "::") for line in listing.splitlines()):
+                    raise RuntimeError(f"Published SDK test selection is incomplete: {prefix}")
+            subprocess.run(command, env=env, check=True)
+    verifier["dependencies"]()
     if args.native_postgres:
-        print("Native PostgreSQL library bootstrap, CDC and cold recovery passed; not signed-plugin/UI acceptance")
+        print("Native PostgreSQL library bootstrap, CDC and cold recovery passed; not configured-plugin/UI acceptance")
     elif args.postgres:
-        print("Real PostgreSQL SDK bootstrap, CDC and recovery checks passed; not signed-plugin/UI acceptance")
+        print("Real PostgreSQL SDK bootstrap, CDC and recovery checks passed; not configured-plugin/UI acceptance")
     else:
-        print("Prepared SDK recovery, preserving removal and joined-stop checks passed")
+        print("Published SDK query, bootstrap and recovery checks passed; no existing-only or preserving-removal guarantee")
 
 
 if __name__ == "__main__":

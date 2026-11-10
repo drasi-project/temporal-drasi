@@ -409,7 +409,7 @@ impl Host {
         }
         let core = self.core()?;
         let stopped = if admission.definition.is_query() {
-            core.stop_query(id).await.map_err(Error::from)
+            self.stop_query(id).await
         } else {
             for (query_id, query) in &ledger.nodes {
                 if matches!(&query.definition.recipe, NodeRecipe::Query { sources, .. } if sources.iter().any(|source| source == id))
@@ -426,6 +426,13 @@ impl Host {
                     }
                 }
             }
+            let retry_error = {
+                let graph = core.component_graph();
+                let graph = graph.read().await;
+                graph
+                    .get_component(id)
+                    .is_some_and(|component| component.status == ComponentStatus::Error)
+            };
             if retry_resident {
                 let source = self
                     .managed_sources
@@ -434,6 +441,16 @@ impl Host {
                     .get(id)
                     .expect("resident managed source")
                     .source();
+                source.stop().await.map_err(Error::from)
+            } else if retry_error {
+                let source = {
+                    let graph = core.component_graph();
+                    let graph = graph.read().await;
+                    graph
+                        .get_runtime::<Arc<dyn Source>>(id)
+                        .cloned()
+                        .ok_or_else(|| Error::new(7, "failed source runtime is missing"))?
+                };
                 source.stop().await.map_err(Error::from)
             } else {
                 core.stop_source(id).await.map_err(Error::from)
@@ -449,6 +466,11 @@ impl Host {
                 .get_or_insert_with(|| error.clone());
             return Err(error);
         }
+        core.component_graph()
+            .write()
+            .await
+            .validate_and_transition(id, ComponentStatus::Stopped, None)
+            .map_err(Error::from)?;
         if retry_resident {
             ledger.nodes.get_mut(id).expect("retained admission").fault = None;
             self.save_catalog(ledger.clone()).await?;
@@ -508,14 +530,12 @@ impl Host {
             self.save_catalog(ledger.clone()).await?;
             self.store()?.sync().await.map_err(io)?;
             drop(handoffs);
+            let _snapshots = self.snapshots.write().await;
             let graph = self.core()?.component_graph();
             let present = graph.read().await.get_component(id).is_some();
             if present {
                 if admission.definition.is_query() {
-                    self.core()?
-                        .remove_query_preserving_state(id)
-                        .await
-                        .map_err(Error::from)?;
+                    self.core()?.remove_query(id).await.map_err(Error::from)?;
                 } else {
                     self.core()?
                         .remove_source(id, false)
@@ -645,7 +665,6 @@ impl Host {
                         return Err(Error::new(3, "admitted query source is not running"));
                     }
                 }
-                let creation = admission.phase == Phase::Intended;
                 let existing = {
                     let graph = core.component_graph();
                     let graph = graph.read().await;
@@ -660,17 +679,12 @@ impl Host {
                         .definition
                         .query_config(&id)
                         .expect("query recipe");
-                    core.add_query(config.native(
-                        if creation {
-                            drasi_lib::RecoveryPolicy::Strict
-                        } else {
-                            drasi_lib::RecoveryPolicy::ExistingOnly
-                        },
+                    self.install_query(config.native(
+                        drasi_lib::RecoveryPolicy::Strict,
                         self.config.limits.outbox_entries,
                         false,
                     ))
-                    .await
-                    .map_err(Error::from)?;
+                    .await?;
                 }
                 ledger.nodes.get_mut(&id).expect("retained admission").phase = Phase::Provisioned;
                 self.save_catalog(ledger.clone()).await?;
@@ -681,13 +695,8 @@ impl Host {
                     .map_err(|error| Error::new(7, error))?;
                 match query.status().await {
                     ComponentStatus::Running | ComponentStatus::Starting => {}
-                    ComponentStatus::Added | ComponentStatus::Stopped if creation => {
-                        core.start_query(&id).await.map_err(Error::from)?;
-                    }
                     ComponentStatus::Added | ComponentStatus::Stopped => {
-                        core.start_query_existing(&id)
-                            .await
-                            .map_err(Error::from)?;
+                        core.start_query(&id).await.map_err(Error::from)?;
                     }
                     _ => return Err(Error::new(3, "query admission cannot resume this runtime; existing-state recovery or explicit reset is required")),
                 }

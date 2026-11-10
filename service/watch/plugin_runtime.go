@@ -19,7 +19,6 @@ type runtimePluginObservation struct {
 	generation uint64
 	observedAt time.Time
 	state      native.PluginHostState
-	signer     native.Identity
 	problem    string
 	retryAt    time.Time
 }
@@ -168,15 +167,11 @@ func (p *runtimePlugins) probe(ctx context.Context, plugin *contractpb.Plugin) (
 		len(observed.Message) > 1024 {
 		return nil, serviceerror.NewDataLoss("native plugin observation does not match the runtime and immutable selection")
 	}
-	signer := observed.VerifiedSignerIdentity
-	if signer != nil && (len(signer.Issuer) > 1024 || len(signer.Subject) > 1024) {
-		return nil, serviceerror.NewDataLoss("native plugin signer exceeds its byte limit")
-	}
 	switch observed.State {
 	case native.PluginAvailable, native.PluginFailed, native.PluginIncompatible, native.PluginRestartRequired:
 	case native.PluginInstalled, native.PluginLoaded:
-		if !observed.Plugin.Compatible || signer == nil || signer.Issuer == "" || signer.Subject == "" {
-			return nil, serviceerror.NewDataLoss("native plugin success has no compatible signed installation")
+		if !observed.Plugin.Compatible {
+			return nil, serviceerror.NewDataLoss("native plugin success has no compatible installation")
 		}
 	default:
 		return nil, serviceerror.NewDataLoss("native plugin observation has an unknown state")
@@ -243,9 +238,6 @@ func runtimePluginResult(observed *native.PluginObservation) runtimePluginObserv
 	now := time.Now()
 	result := runtimePluginObservation{
 		observedAt: now, state: observed.State, problem: observed.Message, retryAt: now.Add(time.Minute),
-	}
-	if observed.VerifiedSignerIdentity != nil {
-		result.signer = *observed.VerifiedSignerIdentity
 	}
 	return result
 }

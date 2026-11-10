@@ -87,7 +87,7 @@ func TestDrasiUIFixture(t *testing.T) {
 		require.ErrorIs(t, decoder.Decode(&trailing), io.EOF)
 		policy = watchservice.PluginPolicy{
 			Preload: selection.Plugins, Catalogs: selection.Catalogs,
-			Trust: selection.Trust, ManagedPlugins: selection.ManagedPlugins,
+			ManagedPlugins: selection.ManagedPlugins,
 		}
 	}
 	var postgres *drasiUIPostgres

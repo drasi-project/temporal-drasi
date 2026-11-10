@@ -9,17 +9,33 @@ fn reference() -> SecretRef {
     }
 }
 
+fn tls_reference() -> SecretRef {
+    SecretRef {
+        provider: "postgres-fixture".into(),
+        key: "tls-mode".into(),
+        version: "1".into(),
+    }
+}
+
 fn values() -> AdmissionValues {
     AdmissionValues::new(
         [ComponentSlot::Source, ComponentSlot::Bootstrap]
             .into_iter()
-            .map(|component| {
-                ResolvedField::new(
-                    component,
-                    "password".into(),
-                    reference(),
-                    b"verification-only-password".to_vec(),
-                )
+            .flat_map(|component| {
+                [
+                    ResolvedField::new(
+                        component,
+                        "password".into(),
+                        reference(),
+                        b"verification-only-password".to_vec(),
+                    ),
+                    ResolvedField::new(
+                        component,
+                        "sslMode".into(),
+                        tls_reference(),
+                        b"disable".to_vec(),
+                    ),
+                ]
             })
             .collect(),
     )
@@ -68,7 +84,7 @@ fn private_absent(path: &Path) {
 }
 
 pub(crate) async fn exercise(
-    make_plugins: impl Fn() -> Plugins,
+    make_plugins: impl Fn(&Path) -> Plugins,
     source_pin: &str,
     bootstrap_pin: &str,
     container: &str,
@@ -81,8 +97,7 @@ pub(crate) async fn exercise(
         "user": "postgres",
         "tables": ["watch_items"],
         "slotName": "native_fixture_slot",
-        "publicationName": "native_fixture_pub",
-        "sslMode": "disable"
+        "publicationName": "native_fixture_pub"
     });
     let component = |pin: &str| ComponentRecipe {
         plugin: PluginComponentRef {
@@ -90,8 +105,13 @@ pub(crate) async fn exercise(
             component: "postgres".into(),
         },
         configuration: connection.clone(),
-        secrets: BTreeMap::from([("password".into(), reference())]),
+        secrets: BTreeMap::from([
+            ("password".into(), reference()),
+            ("sslMode".into(), tls_reference()),
+        ]),
     };
+    let mut bootstrap = component(bootstrap_pin);
+    bootstrap.configuration["slotName"] = json!("unused_bootstrap_slot");
     let definition = NodeDefinition {
         lifetime: ResourceLifetime {
             namespace_id: "00000000-0000-4000-8000-000000000001".into(),
@@ -101,7 +121,7 @@ pub(crate) async fn exercise(
         activation: 1,
         recipe: NodeRecipe::PluginSource {
             source: Box::new(component(source_pin)),
-            bootstrap: Box::new(component(bootstrap_pin)),
+            bootstrap: Box::new(bootstrap),
         },
     };
     let workspace = Workspace::new();
@@ -114,7 +134,26 @@ pub(crate) async fn exercise(
         bootstrap: component(bootstrap_pin).plugin,
     }];
     let mut host = Host::open(config.clone()).await.unwrap();
-    host.plugins = Some(Mutex::new(make_plugins()));
+    host.plugins = Some(Mutex::new(make_plugins(Path::new(&host.config.state_dir))));
+    for (field, value) in [
+        ("port", json!(65536)),
+        ("port", json!("5432")),
+        ("sslMode", json!("invalid")),
+    ] {
+        let mut invalid = definition.clone();
+        let NodeRecipe::PluginSource { source, bootstrap } = &mut invalid.recipe else {
+            unreachable!()
+        };
+        for component in [source, bootstrap] {
+            component.secrets.remove(field);
+            component.configuration[field] = value.clone();
+        }
+        assert_eq!(
+            host.check_plugin_source(invalid).await.unwrap_err().code,
+            1,
+            "{field}: {value}"
+        );
+    }
     assert!(host.check_plugin_source(definition.clone()).await.unwrap());
     let source = host
         .admit_plugin_source(definition.clone(), values())
@@ -181,7 +220,7 @@ pub(crate) async fn exercise(
 
     sql(container, "UPDATE watch_items SET amount = 22 WHERE id = 1");
     let mut host = Host::open(config).await.unwrap();
-    host.plugins = Some(Mutex::new(make_plugins()));
+    host.plugins = Some(Mutex::new(make_plugins(Path::new(&host.config.state_dir))));
     let restored_source = host
         .admit_plugin_source(definition, values())
         .await

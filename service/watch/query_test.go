@@ -33,7 +33,7 @@ func TestCompilerHostPublishesVerifiedExternalCapability(t *testing.T) {
 		{name: "default remains builtin only"},
 		{name: "reader alone", reader: true},
 		{name: "reviewed pair alone", reviewed: true},
-		{name: "signed loaded reviewed pair and reader", reviewed: true, reader: true, available: true},
+		{name: "loaded reviewed pair and reader", reviewed: true, reader: true, available: true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			t.Parallel()

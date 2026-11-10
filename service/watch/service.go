@@ -166,7 +166,7 @@ func (s *Service) Start(ctx context.Context) error {
 	management, err := native.Open(ctx, native.Config{
 		InstanceID: watchregistry.ClusterPluginBusinessID, OwnerEpoch: 1, StartMode: native.StartModeDormant,
 		StateDir: filepath.Join(s.config.StateRoot, "cluster-plugins"),
-		Plugins:  policy.Preload, Catalogs: policy.Catalogs, Trust: policy.Trust, ManagedPlugins: policy.ManagedPlugins,
+		Plugins:  policy.Preload, Catalogs: policy.Catalogs, ManagedPlugins: policy.ManagedPlugins,
 	})
 	if err != nil {
 		return fmt.Errorf("open Watch plugin management runtime: %w", err)

@@ -66,6 +66,17 @@ class DevelopmentPackageTests(unittest.TestCase):
                 cwd=consumer, check=True,
             )
             subprocess.run(["node", "scripts/test-json.cjs"], cwd=consumer, check=True)
+            subprocess.run(
+                ["node", "-e", """
+const assert = require('node:assert/strict');
+const schema = require('@drasi-project/temporal-watch-contracts/temporal-execution-state');
+assert.equal(schema.apiVersion, 'v1');
+assert.equal(schema.schemaVersion, 1);
+assert.deepEqual(schema.nodes.map(node => node.label), ['Workflow', 'Activity', 'Timer', 'Fact']);
+assert.deepEqual(schema, require('./schema/temporal-execution-state.json'));
+"""],
+                cwd=consumer, check=True,
+            )
             env["PATH"] = str(compiler.parent) + os.pathsep + env["PATH"]
             rebuilt = json.loads(subprocess.check_output(
                 [sys.executable, "scripts/package-development.py", "--output", str(root / "rebuilt")],

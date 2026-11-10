@@ -8,8 +8,8 @@ publish = false
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-drasi-lib = { git = "https://github.com/drasi-project/drasi-core", rev = "9469f3e01ff22c4f0092c9900dfbd5051ceae545" }
-drasi-plugin-sdk = { git = "https://github.com/drasi-project/drasi-core", rev = "9469f3e01ff22c4f0092c9900dfbd5051ceae545" }
+drasi-lib = "=0.9.3"
+drasi-plugin-sdk = "=0.11.3"
 async-trait = "0.1"
 anyhow = "1"
 serde_json = "1"

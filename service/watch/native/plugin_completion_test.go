@@ -89,10 +89,10 @@ func TestPluginCompletionAttemptReplayAndFencing(t *testing.T) {
 
 func TestPluginCompletionFreezesCommandsAndDetachesResults(t *testing.T) {
 	t.Parallel()
-	catalog, trust, _, release := blockedPluginCatalog(t)
+	catalog, _, release := blockedPluginCatalog(t)
 	defer release()
 	config := configuration(filepath.Join(workspace(t), "owner"))
-	config.Catalogs, config.Trust = []CatalogConfig{catalog}, trust
+	config.Catalogs = []CatalogConfig{catalog}
 	runtime := openRuntime(t, config)
 	command := &DiscoverPluginsCommand{CatalogID: "trusted", Search: "excluded"}
 	attempt, err := runtime.Plugin(command)
@@ -115,10 +115,10 @@ func TestPluginCompletionFreezesCommandsAndDetachesResults(t *testing.T) {
 
 func TestPluginCompletionJoinsCanceledWaitBeforeClose(t *testing.T) {
 	t.Parallel()
-	catalog, trust, started, release := blockedPluginCatalog(t)
+	catalog, started, release := blockedPluginCatalog(t)
 	defer release()
 	config := configuration(filepath.Join(workspace(t), "owner"))
-	config.Catalogs, config.Trust = []CatalogConfig{catalog}, trust
+	config.Catalogs = []CatalogConfig{catalog}
 	runtime := openRuntime(t, config)
 	attempt, err := runtime.Plugin(InspectPluginCommand{
 		Selection: PluginSelection{CatalogID: "trusted", PluginID: "source", Version: "1.0.0"},
@@ -162,7 +162,7 @@ func TestPluginCompletionJoinsCanceledWaitBeforeClose(t *testing.T) {
 
 //parallelize:ignore
 func TestPluginCompletionProcessCapacitySurvivesCanceledWaiters(t *testing.T) {
-	catalog, trust, started, release := blockedPluginCatalog(t)
+	catalog, started, release := blockedPluginCatalog(t)
 	defer release()
 	root := workspace(t)
 	var attempts []*PluginAttempt
@@ -171,7 +171,7 @@ func TestPluginCompletionProcessCapacitySurvivesCanceledWaiters(t *testing.T) {
 	for range 8 {
 		runtime := openRuntime(t, Config{
 			StateDir: filepath.Join(root, "owner-"+uuid.NewString()), OwnerEpoch: 1, InstanceID: "capacity",
-			StartMode: StartModeDormant, Catalogs: []CatalogConfig{catalog}, Trust: trust,
+			StartMode: StartModeDormant, Catalogs: []CatalogConfig{catalog},
 		})
 		attempt, err := runtime.Plugin(InspectPluginCommand{
 			Selection: PluginSelection{CatalogID: "trusted", PluginID: "source", Version: "1.0.0"},
@@ -197,7 +197,7 @@ func TestPluginCompletionProcessCapacitySurvivesCanceledWaiters(t *testing.T) {
 	}
 	overflow := openRuntime(t, Config{
 		StateDir: filepath.Join(root, "overflow"), OwnerEpoch: 1, InstanceID: "overflow",
-		StartMode: StartModeDormant, Catalogs: []CatalogConfig{catalog}, Trust: trust,
+		StartMode: StartModeDormant, Catalogs: []CatalogConfig{catalog},
 	})
 	retry, err := overflow.Plugin(InspectPluginCommand{
 		Selection: PluginSelection{CatalogID: "trusted", PluginID: "source", Version: "1.0.0"},

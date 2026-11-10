@@ -50,9 +50,6 @@ impl drasi_lib::queries::Query for DelayedSnapshot {
     async fn release_persistent_handles(&self) {
         self.query.release_persistent_handles().await;
     }
-    async fn prepare_for_removal_preserving_state(&self) -> anyhow::Result<()> {
-        self.query.prepare_for_removal_preserving_state().await
-    }
 }
 
 async fn retire(host: &Host, id: &str) -> Result<Value> {
@@ -324,9 +321,24 @@ async fn subscribe_cannot_commit_a_snapshot_captured_before_retirement() {
         .await
         .unwrap();
     stop_node(&host, id).await;
-    retire(&host, id).await.unwrap();
+    let retiring = host.clone();
+    let retired_id = id.to_owned();
+    let retirement = tokio::spawn(async move { retire(&retiring, &retired_id).await });
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            if host.catalog().unwrap().lock().await.nodes[id].retirement
+                == Some(Retirement::Retiring)
+            {
+                return;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
     release.notify_one();
     assert!(pending.await.unwrap().is_err());
+    retirement.await.unwrap().unwrap();
     assert_eq!(
         host.store()
             .unwrap()

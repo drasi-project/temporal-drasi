@@ -364,11 +364,6 @@ func TestNativeCancellationAndErrors(t *testing.T) {
 func TestNativeCatalogOperationsAreHostLocalAndFailClosed(t *testing.T) {
 	t.Parallel()
 	config := configuration(filepath.Join(workspace(t), "owner"))
-	config.Trust = Trust{
-		RegistryPrefixes: []string{"registry.example/trusted"},
-		Identities:       []Identity{{Issuer: "issuer", Subject: "subject"}},
-	}
-
 	config.Catalogs = []CatalogConfig{{
 		ID: "trusted", DisplayName: "Trusted plugins",
 		Plugins: []CatalogRelease{{
@@ -411,7 +406,7 @@ func TestNativeCatalogOperationsAreHostLocalAndFailClosed(t *testing.T) {
 	requireSnapshot(t, runtime, `[{"name":"alpha","doubled":24}]`)
 }
 
-func blockedPluginCatalog(t *testing.T) (CatalogConfig, Trust, <-chan struct{}, func()) {
+func blockedPluginCatalog(t *testing.T) (CatalogConfig, <-chan struct{}, func()) {
 	t.Helper()
 	started := make(chan struct{}, 8)
 	release := make(chan struct{})
@@ -430,10 +425,6 @@ func blockedPluginCatalog(t *testing.T) (CatalogConfig, Trust, <-chan struct{}, 
 	server.StartTLS()
 	t.Cleanup(server.Close)
 	registry := strings.TrimPrefix(server.URL, "https://") + "/trusted"
-	trust := Trust{
-		RegistryPrefixes: []string{registry},
-		Identities:       []Identity{{Issuer: "issuer", Subject: "subject"}},
-	}
 	catalog := CatalogConfig{
 		ID: "trusted", DisplayName: "Trusted plugins",
 		Plugins: []CatalogRelease{{
@@ -447,14 +438,14 @@ func blockedPluginCatalog(t *testing.T) (CatalogConfig, Trust, <-chan struct{}, 
 	var once sync.Once
 	unblock := func() { once.Do(func() { close(release) }) }
 	t.Cleanup(unblock)
-	return catalog, trust, started, unblock
+	return catalog, started, unblock
 }
 
 func TestNativePendingOutputRemainsServiceableDuringPluginIO(t *testing.T) {
 	t.Parallel()
-	catalog, trust, started, release := blockedPluginCatalog(t)
+	catalog, started, release := blockedPluginCatalog(t)
 	config := configuration(filepath.Join(workspace(t), "owner"))
-	config.Catalogs, config.Trust = []CatalogConfig{catalog}, trust
+	config.Catalogs = []CatalogConfig{catalog}
 	runtime := openRuntime(t, config)
 	defer release()
 	_, err := runtime.Apply(t.Context(), SubscribeCommand{Subscription: Subscription{

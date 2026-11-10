@@ -6,6 +6,7 @@ use crate::{
     protocol::*,
     source::{BootstrapLimits, Journal, TemporalSource},
 };
+use drasi_core::interface::IndexBackendPlugin;
 use drasi_index_rocksdb::RocksDbIndexProvider;
 use drasi_lib::{queries::output_state::FetchError, DrasiLib, Query, StateStoreProvider};
 use drasi_state_store_redb::RedbStateStoreProvider;
@@ -58,12 +59,14 @@ struct Handoff {
 pub struct Host {
     config: Config,
     core: Option<DrasiLib>,
+    query_indexes: Option<Arc<dyn IndexBackendPlugin>>,
     store: Option<Arc<dyn StateStoreProvider>>,
     sources: Mutex<BTreeMap<String, TemporalSource>>,
     managed_sources: Mutex<BTreeMap<String, ManagedInstance>>,
     deferred: Mutex<BTreeSet<String>>,
     plugins: Option<Mutex<Plugins>>,
     handoffs: Mutex<()>,
+    snapshots: tokio::sync::RwLock<()>,
     binding_gates: Mutex<BTreeMap<String, Arc<Mutex<()>>>>,
     catalog: Option<Mutex<AdmissionLedger>>,
     topology: Mutex<()>,
@@ -227,7 +230,7 @@ impl Config {
             }
         }
         for plugin in &self.plugins {
-            crate::plugins::validate_policy(plugin, &self.trust)?;
+            crate::plugins::validate_policy(plugin)?;
         }
         if self.managed_plugins.len() > 64 {
             return Err(Error::new(1, "managed plugin policy capacity exceeded"));
@@ -240,7 +243,7 @@ impl Config {
                 return Err(Error::new(1, "duplicate managed plugin policy"));
             }
         }
-        crate::plugins::validate_catalogs(&self.catalogs, &self.trust)?;
+        crate::plugins::validate_catalogs(&self.catalogs)?;
         Ok(())
     }
 
@@ -265,6 +268,7 @@ impl QueryConfig {
             Language::Gql => Query::gql(&self.id),
         }
         .query(&self.text)
+        .enable_bootstrap(true)
         .with_recovery_policy(recovery)
         .with_outbox_capacity(outbox_entries)
         .auto_start(auto_start);
@@ -408,25 +412,24 @@ impl Host {
         let plugins = Plugins::open(
             &config.plugins,
             &config.catalogs,
-            &config.trust,
             &Path::new(&config.state_dir).join("plugins"),
             &config.instance_id,
         )
         .await?;
         let journal = Arc::new(Journal::new(store.clone(), config.limits.feed_events));
-        let indexes =
+        let indexes: Arc<dyn IndexBackendPlugin> = Arc::new(
             RocksDbIndexProvider::new(Path::new(&config.state_dir).join("indexes"), true, false)
                 .with_memory_budget_bytes(256 << 20)
-                .map_err(io)?;
+                .map_err(io)?,
+        );
         let mut builder = DrasiLib::builder()
             .with_id(&config.instance_id)
-            .with_bootstrap_certification(true)
-            .with_default_index_provider("persistent", Arc::new(indexes))
+            .with_default_index_provider("persistent", indexes.clone())
             .with_state_store_provider(store.clone())
             .with_wal_provider(Arc::new(RedbWalProvider::new(
                 Path::new(&config.state_dir).join("wal"),
             )))
-            .with_default_recovery_policy(drasi_lib::RecoveryPolicy::ExistingOnly);
+            .with_default_recovery_policy(drasi_lib::RecoveryPolicy::Strict);
         let mut source_configs = config.sources.clone();
         let mut query_configs = config.queries.clone();
         let mut deferred = BTreeSet::new();
@@ -485,27 +488,18 @@ impl Host {
                 }
             }
         }
-        for query in &query_configs {
-            builder = builder.with_query(query.native(
-                if recovering {
-                    drasi_lib::RecoveryPolicy::ExistingOnly
-                } else {
-                    drasi_lib::RecoveryPolicy::Strict
-                },
-                config.limits.outbox_entries,
-                auto_start,
-            ));
-        }
         let core = builder.build().await.map_err(Error::from)?;
         let mut host = Self {
             config,
             core: Some(core),
+            query_indexes: Some(indexes),
             store: Some(store),
             sources: Mutex::new(sources),
             managed_sources: Mutex::new(BTreeMap::new()),
             deferred: Mutex::new(deferred),
             plugins: Some(Mutex::new(plugins)),
             handoffs: Mutex::new(()),
+            snapshots: tokio::sync::RwLock::new(()),
             binding_gates: Mutex::new(BTreeMap::new()),
             catalog: Some(Mutex::new(catalog)),
             topology: Mutex::new(()),
@@ -516,6 +510,14 @@ impl Host {
             _lock: Some(lock),
         };
         let startup = async {
+            for query in &query_configs {
+                host.install_query(query.native(
+                    drasi_lib::RecoveryPolicy::Strict,
+                    host.config.limits.outbox_entries,
+                    auto_start,
+                ))
+                .await?;
+            }
             let core = host.core()?;
             core.start().await.map_err(Error::from)?;
             // The SDK starts queries best-effort and can return success with failed admissions.
@@ -568,6 +570,53 @@ impl Host {
         self.store
             .as_ref()
             .ok_or_else(|| Error::new(3, "runtime is closed"))
+    }
+
+    async fn install_query(&self, config: drasi_lib::config::QueryConfig) -> Result<()> {
+        let auto_start = config.auto_start;
+        let id = config.id.clone();
+        let indexes = self
+            .query_indexes
+            .as_ref()
+            .ok_or_else(|| Error::new(3, "runtime is closed"))?;
+        let expected_existing = self
+            .catalog()?
+            .lock()
+            .await
+            .nodes
+            .get(&id)
+            .is_some_and(|node| node.phase == Phase::Ready);
+        crate::owned_query::install(
+            self.core()?,
+            indexes.clone(),
+            config,
+            self.config.limits.clone(),
+            self.store()?.clone(),
+            expected_existing,
+        )
+        .await
+        .map_err(Error::from)?;
+        let core = self.core()?;
+        if auto_start && core.is_running().await {
+            core.start_query(&id).await.map_err(Error::from)?;
+        }
+        Ok(())
+    }
+
+    async fn stop_query(&self, id: &str) -> Result<()> {
+        let core = self.core()?;
+        let query = core
+            .query_manager()
+            .get_query_instance(id)
+            .await
+            .map_err(|error| Error::new(2, error))?;
+        query.stop().await.map_err(Error::from)?;
+        core.component_graph()
+            .write()
+            .await
+            .validate_and_transition(id, drasi_lib::channels::ComponentStatus::Stopped, None)
+            .map_err(Error::from)?;
+        Ok(())
     }
 
     async fn query_config(&self, id: &str) -> Result<QueryConfig> {
@@ -841,6 +890,7 @@ impl Host {
     }
 
     async fn snapshot(&self, query_id: &str, subscription_id: &str) -> Result<Event> {
+        let _snapshot = self.snapshots.read().await;
         let revision = self.query_config(query_id).await?.revision;
         self.require_query_resident(query_id).await?;
         let query = self
@@ -855,7 +905,11 @@ impl Host {
                 "durable handoff cannot attach to a volatile query",
             ));
         }
-        let snapshot = query.fetch_snapshot().await.map_err(fetch)?;
+        let snapshot = query.fetch_snapshot().await;
+        crate::owned_query::check_output_failure(query.as_ref())
+            .await
+            .map_err(Error::from)?;
+        let snapshot = snapshot.map_err(fetch)?;
         if snapshot.len() > self.config.limits.snapshot_rows {
             return Err(Error::new(3, "snapshot exceeds configured row limit"));
         }
@@ -959,7 +1013,11 @@ impl Host {
                 .get_query_instance(&handoff.definition.query_id)
                 .await
                 .map_err(|error| Error::new(2, error))?;
-            let outbox = query.fetch_outbox(handoff.cursor).await.map_err(fetch)?;
+            let outbox = query.fetch_outbox(handoff.cursor).await;
+            crate::owned_query::check_output_failure(query.as_ref())
+                .await
+                .map_err(Error::from)?;
+            let outbox = outbox.map_err(fetch)?;
             let incarnation = self.incarnation(
                 &handoff.definition.query_id,
                 outbox.config_hash,
@@ -1081,35 +1139,64 @@ impl Host {
 
     async fn close_graph(&mut self) -> Result<()> {
         if let Some(core) = self.core.as_ref() {
-            core.shutdown().await.map_err(Error::from)?;
-            // Pinned Drasi graph runtimes reference their managers and graph. Break those
-            // in-memory cycles after shutdown without deprovisioning persistent data.
             let mut sources = Vec::new();
             let mut queries = Vec::new();
             let mut reactions = Vec::new();
             {
                 let graph = core.component_graph();
-                let mut graph = graph.write().await;
+                let graph = graph.read().await;
                 let nodes = graph.snapshot().nodes;
                 for node in nodes {
                     use drasi_lib::component_graph::ComponentKind;
                     match node.kind {
                         ComponentKind::Source => {
-                            sources
-                                .extend(graph.take_runtime::<Arc<dyn drasi_lib::Source>>(&node.id));
+                            sources.extend(
+                                graph
+                                    .get_runtime::<Arc<dyn drasi_lib::Source>>(&node.id)
+                                    .cloned(),
+                            );
                         }
                         ComponentKind::Query => {
                             queries.extend(
-                                graph.take_runtime::<Arc<dyn drasi_lib::queries::Query>>(&node.id),
+                                graph
+                                    .get_runtime::<Arc<dyn drasi_lib::queries::Query>>(&node.id)
+                                    .cloned()
+                                    .map(|query| (node.id, query)),
                             );
                         }
                         ComponentKind::Reaction => {
                             reactions.extend(
-                                graph.take_runtime::<Arc<dyn drasi_lib::Reaction>>(&node.id),
+                                graph
+                                    .get_runtime::<Arc<dyn drasi_lib::Reaction>>(&node.id)
+                                    .cloned(),
                             );
                         }
                         _ => {}
                     }
+                }
+            }
+            // SDK shutdown is best-effort, so join each owner before releasing the graph.
+            for (_, query) in &queries {
+                query.stop().await.map_err(Error::from)?;
+            }
+            for reaction in &reactions {
+                reaction.stop().await.map_err(Error::from)?;
+            }
+            for source in &sources {
+                source.stop().await.map_err(Error::from)?;
+            }
+            core.shutdown().await.map_err(Error::from)?;
+            {
+                let graph = core.component_graph();
+                let mut graph = graph.write().await;
+                for source in &sources {
+                    drop(graph.take_runtime::<Arc<dyn drasi_lib::Source>>(source.id()));
+                }
+                for (id, _) in &queries {
+                    drop(graph.take_runtime::<Arc<dyn drasi_lib::queries::Query>>(id));
+                }
+                for reaction in &reactions {
+                    drop(graph.take_runtime::<Arc<dyn drasi_lib::Reaction>>(reaction.id()));
                 }
             }
             self.sources.get_mut().clear();
@@ -1119,6 +1206,7 @@ impl Host {
             drop(queries);
             drop(reactions);
             self.core.take();
+            self.query_indexes.take();
             let managed = std::mem::take(self.managed_sources.get_mut());
             let mut failure = None;
             for instance in managed.into_values() {

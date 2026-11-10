@@ -186,7 +186,7 @@ func graphConfiguration(options GraphOptions, epoch uint64) native.Config {
 		InstanceID: options.NamespaceID, OwnerEpoch: epoch, StartMode: native.StartModeDormant,
 		StateDir: graphDirectory(options.StateRoot, options.NamespaceID, "owners", epoch),
 		Plugins:  options.Plugins.Preload, Catalogs: options.Plugins.Catalogs,
-		Trust: options.Plugins.Trust, ManagedPlugins: options.Plugins.ManagedPlugins,
+		ManagedPlugins: options.Plugins.ManagedPlugins,
 	}
 }
 

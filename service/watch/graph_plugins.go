@@ -19,7 +19,6 @@ import (
 type PluginPolicy struct {
 	Preload        []native.Plugin
 	Catalogs       []native.CatalogConfig
-	Trust          native.Trust
 	ManagedPlugins []native.ManagedPluginPair
 }
 
@@ -36,8 +35,6 @@ func clonePluginPolicy(policy PluginPolicy) PluginPolicy {
 	for index := range policy.Catalogs {
 		policy.Catalogs[index].Plugins = slices.Clone(policy.Catalogs[index].Plugins)
 	}
-	policy.Trust.RegistryPrefixes = slices.Clone(policy.Trust.RegistryPrefixes)
-	policy.Trust.Identities = slices.Clone(policy.Trust.Identities)
 	policy.ManagedPlugins = slices.Clone(policy.ManagedPlugins)
 	return policy
 }

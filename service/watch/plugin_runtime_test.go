@@ -132,17 +132,12 @@ func TestReducePluginObservations(t *testing.T) {
 			for i, state := range test.states {
 				samples[i] = runtimePluginObservation{
 					state: state, observedAt: now.Add(-time.Duration(i) * time.Second),
-					signer: native.Identity{Issuer: "issuer", Subject: "subject"},
 				}
 			}
 			status := reducePluginObservations("host", test.load, samples)
 			expected := &contractpb.PluginHostStatus{
 				HostId: "host", State: test.expected,
 				UpdatedAt: timestamppb.New(now.Add(-time.Duration(len(samples)-1) * time.Second)),
-			}
-			if test.expected == contractpb.PluginHostState_PLUGIN_HOST_STATE_LOADED ||
-				test.expected == contractpb.PluginHostState_PLUGIN_HOST_STATE_INSTALLED {
-				expected.VerifiedSignerIdentity = "subject (issuer: issuer)"
 			}
 			if test.expected == contractpb.PluginHostState_PLUGIN_HOST_STATE_UNSPECIFIED {
 				expected.Message = "One or more local runtimes have no fresh plugin observation"

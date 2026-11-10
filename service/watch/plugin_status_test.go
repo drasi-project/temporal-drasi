@@ -28,7 +28,6 @@ func pluginStatusService(t *testing.T) (*Service, string, namespace.ID) {
 			observations: map[string]runtimePluginObservation{
 				digest: {
 					generation: view.snapshot.Generation, observedAt: now, state: native.PluginLoaded,
-					signer: native.Identity{Issuer: "issuer", Subject: "subject"},
 				},
 			},
 		}
@@ -55,7 +54,7 @@ func TestExternalSourcesRequireReviewedLoadedPair(t *testing.T) {
 		change    func(*Service, string, string, namespace.ID)
 		available bool
 	}{
-		{name: "both signed components loaded everywhere", available: true},
+		{name: "unsigned components loaded everywhere", available: true},
 		{name: "no active namespace graphs", available: true, change: func(s *Service, _, _ string, _ namespace.ID) {
 			clear(s.namespaces)
 		}},
@@ -91,11 +90,6 @@ func TestExternalSourcesRequireReviewedLoadedPair(t *testing.T) {
 			observation := s.plugins.observations[bootstrap]
 			observation.state, observation.problem = native.PluginIncompatible, "embedded version mismatch"
 			s.plugins.observations[bootstrap] = observation
-		}},
-		{name: "missing signed identity", change: func(s *Service, source, _ string, _ namespace.ID) {
-			observation := s.plugins.observations[source]
-			observation.signer = native.Identity{}
-			s.plugins.observations[source] = observation
 		}},
 		{name: "graph missing bootstrap evidence", change: func(s *Service, _, bootstrap string, id namespace.ID) {
 			delete(s.namespaces[id].graph.plugins.observations, bootstrap)

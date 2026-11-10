@@ -6,12 +6,21 @@ import (
 	"testing"
 
 	contractpb "github.com/drasi-project/temporal-drasi/contracts/watch/v1"
+	"github.com/drasi-project/temporal-drasi/contracts/watch/validation"
 	"github.com/stretchr/testify/require"
 	enumspb "go.temporal.io/api/enums/v1"
 	"go.temporal.io/api/serviceerror"
+	"go.temporal.io/server/api/watchservice/v1"
 	registrypb "go.temporal.io/server/chasm/lib/watchregistry/gen/registrypb/v1"
+	watchclient "go.temporal.io/server/client/watch"
 	"go.temporal.io/server/common"
+	"go.temporal.io/server/common/membership"
+	"go.temporal.io/server/common/primitives"
+	"go.temporal.io/server/common/testing/await"
+	"go.temporal.io/server/common/testing/nettest"
 	"go.temporal.io/server/common/testing/protorequire"
+	"go.uber.org/mock/gomock"
+	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 )
 
@@ -100,6 +109,70 @@ func TestCapabilitiesWithDisabledAuthorizationMatchFrontendPolicy(t *testing.T) 
 	result, err := handler.GetCapabilities(t.Context(), &contractpb.GetCapabilitiesRequest{Namespace: "test"})
 	require.NoError(t, err)
 	require.Equal(t, definitionMethods, result.AllowedMethods)
+}
+
+type queryCapabilityTestServer struct {
+	watchservice.UnimplementedWatchServiceServer
+	external bool
+	requests chan *watchservice.GetCapabilitiesRequest
+}
+
+func (s queryCapabilityTestServer) GetCapabilities(_ context.Context, request *watchservice.GetCapabilitiesRequest) (*contractpb.Capabilities, error) {
+	s.requests <- request
+	return &contractpb.Capabilities{
+		Enabled: true, ApiVersion: "v1", QueryLanguages: []string{"cypher", "gql"},
+		StateStores: []string{"persistent"}, TemporalSource: true, Once: true,
+		ExternalSources: s.external, MaxRequestBytes: validation.MaxRequestBytes,
+	}, nil
+}
+
+func TestFrontendProjectsObservedExternalSourceCapability(t *testing.T) {
+	t.Parallel()
+	for _, test := range []struct {
+		name     string
+		external bool
+		message  string
+	}{
+		{"builtin only", false, "Native compilation is available; query preview and external sources are not configured"},
+		{"loaded external pair", true, "Native compilation and external sources are available; query preview is not configured"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			requests := make(chan *watchservice.GetCapabilitiesRequest, 1)
+			server := grpc.NewServer()
+			watchservice.RegisterWatchServiceServer(server, queryCapabilityTestServer{external: test.external, requests: requests})
+			listener := nettest.NewListener(nettest.NewPipe())
+			done := make(chan error, 1)
+			go func() { done <- server.Serve(listener) }()
+			connection := nettest.NewRPCFactory(listener).CreateWatchGRPCConnection("passthrough:///watch")
+			defer func() {
+				require.NoError(t, connection.Close())
+				server.Stop()
+				require.NoError(t, await.Rcv(t, done))
+			}()
+			controller := gomock.NewController(t)
+			monitor, resolver := membership.NewMockMonitor(controller), membership.NewMockServiceResolver(controller)
+			monitor.EXPECT().GetResolver(primitives.WatchService).Return(resolver, nil)
+			resolver.EXPECT().Lookup("00000000-0000-4000-8000-000000000001").Return(membership.NewHostInfoFromAddress("member:7239"), nil)
+			factory := common.NewMockRPCFactory(controller)
+			factory.EXPECT().CreateWatchGRPCConnection("member:7239").Return(connection)
+			handler := frontendForTest(t, nil)
+			handler.authorizer = nil
+			handler.observer = watchclient.NewObserver(nil, monitor, factory)
+			result, err := handler.GetCapabilities(t.Context(), &contractpb.GetCapabilitiesRequest{Namespace: "test"})
+			require.NoError(t, err)
+			protorequire.ProtoEqual(t, &contractpb.Capabilities{
+				Enabled: true, ApiVersion: "v1", QueryLanguages: []string{"cypher", "gql"},
+				StateStores: []string{"persistent"}, TemporalSource: true, Once: true,
+				ExternalSources: test.external, MaxRequestBytes: DefaultLimits().RequestBytes,
+				AllowedMethods: append(append([]string{}, definitionMethods...), contractpb.WatchService_ValidateQuery_FullMethodName),
+				Message:        test.message,
+			}, result)
+			protorequire.ProtoEqual(t, &watchservice.GetCapabilitiesRequest{
+				NamespaceId: "00000000-0000-4000-8000-000000000001",
+			}, await.Rcv(t, requests))
+		})
+	}
 }
 
 func TestQueryCompilationErrorsPreserveStatusAndRedactDetails(t *testing.T) {

@@ -78,7 +78,7 @@ impl Source for EmptySource {
                 .get("fail_first_start")
                 .and_then(serde_json::Value::as_bool)
                 == Some(true)
-                && self.starts.fetch_add(1, Ordering::Relaxed) == 0)
+                && first_start(&self.configuration, self.id(), &self.starts)?)
         {
             let value =
                 resolved.ok_or_else(|| anyhow::anyhow!("fixture probe requires a credential"))?;
@@ -224,6 +224,43 @@ fn enabled(configuration: &serde_json::Value, field: &str) -> bool {
         == Some(true)
 }
 
+fn audit_factory(configuration: &serde_json::Value, component: &str) -> anyhow::Result<()> {
+    if let Some(path) = configuration
+        .get("factory_audit")
+        .and_then(serde_json::Value::as_str)
+    {
+        use std::io::Write;
+        let mut file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)?;
+        writeln!(file, "{component}")?;
+    }
+    Ok(())
+}
+
+fn first_start(
+    configuration: &HashMap<String, serde_json::Value>,
+    id: &str,
+    starts: &AtomicU64,
+) -> anyhow::Result<bool> {
+    let Some(path) = configuration
+        .get("factory_audit")
+        .and_then(serde_json::Value::as_str)
+    else {
+        return Ok(starts.fetch_add(1, Ordering::Relaxed) == 0);
+    };
+    let marker = format!("failed-start:{id}");
+    if std::fs::read_to_string(path)?
+        .lines()
+        .any(|line| line == marker)
+    {
+        return Ok(false);
+    }
+    audit_factory(&serde_json::to_value(configuration)?, &marker)?;
+    Ok(true)
+}
+
 fn configuration_schema(name: &str) -> String {
     serde_json::json!({name: {
         "type":"object", "additionalProperties":false,
@@ -235,6 +272,7 @@ fn configuration_schema(name: &str) -> String {
                 }], "x-ui":{"secret":true}
             },
             "expected_digest":{"type":"string"},
+            "factory_audit":{"type":"string"},
             "diagnostic_probe":{"type":"boolean"},
             "fail_first_start":{"type":"boolean"},
             "bad_auto_start":{"type":"boolean"},
@@ -274,6 +312,7 @@ impl SourcePluginDescriptor for TestSource {
         auto_start: bool,
     ) -> anyhow::Result<Box<dyn drasi_lib::Source>> {
         SOURCE_CALLS.fetch_add(1, Ordering::Relaxed);
+        audit_factory(configuration, "source")?;
         if enabled(configuration, "fail_factory") {
             return Err(anyhow::anyhow!(
                 "private factory diagnostic: {:?}, {configuration}",
@@ -312,6 +351,7 @@ impl BootstrapPluginDescriptor for TestBootstrap {
         source: &serde_json::Value,
     ) -> anyhow::Result<Box<dyn drasi_lib::bootstrap::BootstrapProvider>> {
         BOOTSTRAP_CALLS.fetch_add(1, Ordering::Relaxed);
+        audit_factory(configuration, "bootstrap")?;
         if enabled(configuration, "fail_bootstrap_factory") {
             return Err(anyhow::anyhow!(
                 "private bootstrap factory diagnostic: {:?}, {configuration}",
@@ -328,7 +368,7 @@ impl BootstrapPluginDescriptor for TestBootstrap {
 drasi_plugin_sdk::export_plugin!(
     plugin_id = "temporal-loader-test",
     core_version = "0.5.10",
-    lib_version = drasi_lib::VERSION,
+    lib_version = "0.9.3",
     plugin_version = "1.0.0",
     source_descriptors = [TestSource],
     reaction_descriptors = [],

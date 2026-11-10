@@ -27,6 +27,22 @@ Do not pass the in-memory union directly to `JSON.stringify`.
 Imported Temporal and Google TypeScript files are generated from pinned inputs;
 applications need no runtime dependency on the Temporal server or Node APIs.
 
+## Temporal source graph schema
+
+`schema/temporal-execution-state.json` describes the built-in source's queryable
+graph data. The Node package exports it as
+`@drasi-project/temporal-watch-contracts/temporal-execution-state`.
+It is a versioned reference for labels, identity and `data.*` properties, types,
+optional fields, enum strings and relationships. It is not a connector
+configuration schema or a claim that an external connector is loaded.
+
+The server's `TestTemporalGraphSchemaMatchesProjection` checks the reference
+against the actual History projection, the complete `Feed*` field declarations
+and their serialized values. Workflow status values are case-sensitive strings
+such as `Running` and `Completed`, not protobuf names such as
+`WORKFLOW_EXECUTION_STATUS_COMPLETED`. Query builders should use this reference
+rather than infer a schema from whichever rows happen to exist.
+
 ## Unpublished development pin
 
 Before a public contract revision is available, create a local content-addressed
@@ -149,7 +165,8 @@ matching `*Request` message, except `GetCapabilities`, which takes the empty
 `GetPluginCapabilitiesRequest` and returns `PluginCapabilities`. Discovery returns catalogs or `Plugin` metadata;
 installation/loading returns `PluginInstallation` with per-host observed states.
 No method accepts a registry URL, file path, native binary, or trust override.
-Catalog and signer configuration belongs to administrators outside this API.
+Catalog and immutable-pin configuration belongs to administrators outside this API.
+Signatures are not required for this proof of concept.
 Descriptor schemas are untrusted data, not executable UI code or remote URLs to fetch.
 
 `GET /api/v1/drasi/plugins/capabilities` uses `ACCESS_CLUSTER_READ` without
@@ -157,7 +174,7 @@ requiring a namespace or probing writes. `PluginCapabilities` contains `enabled`
 `api_version`, `allowed_methods`, `max_request_bytes`, and `message`.
 The backend filters `allowed_methods` to supported PluginService RPCs authorized
 for the current caller; install/load controls require their exact full method
-names to appear. Capability responses do not prove signature verification or
+names to appear. Capability responses do not prove content compatibility or
 native loading, and permissions are rechecked on every subsequent request.
 The namespace `WatchService.GetCapabilities(GetCapabilitiesRequest) -> Capabilities`
 is unchanged and cannot substitute for this cluster authorization scope.
@@ -230,9 +247,10 @@ is unchanged and cannot substitute for this cluster authorization scope.
   rejections are retained too. Receipt capacity exhaustion fails closed without
   evicting identities; each control retains at most 1,024 retry commands within a
   1 MiB control-state budget, for the lifetime of that retained execution.
-- Discovery signer metadata is not verification. VERIFIED/LOADED host states
-  require digest, signature, trusted identity, ABI, SDK/core, and platform checks
-  before native initialization. Loading is desired state, not immediate success.
+- Discovery metadata is not loading evidence. LOADED host states require
+  digest, release, ABI, SDK/core/lib, and platform checks before native
+  initialization. Signer fields are optional legacy metadata, not admission or
+  readiness requirements. Loading is desired state, not immediate success.
   In-use replacements need drain/checkpoint/restart; no live unload is offered.
 
 ## Backend and UI gateway registration

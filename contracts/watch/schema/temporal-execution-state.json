@@ -1,0 +1,104 @@
+{
+  "apiVersion": "v1",
+  "schemaVersion": 1,
+  "title": "Temporal execution state",
+  "description": "Queryable graph data from committed Temporal state. Fields describe the retained execution projection, not workflow inputs or arbitrary database tables.",
+  "identityFields": [
+    {"path":"namespace_id","type":"string","optional":false,"description":"Namespace UUID shared by every node in this source."},
+    {"path":"workflow_id","type":"string","optional":false,"description":"Workflow ID, or execution ID for a standalone activity."},
+    {"path":"run_id","type":"string","optional":false,"description":"Exact execution run ID. Combine with namespace_id and workflow_id to identify a run."}
+  ],
+  "nodes": [
+    {
+      "label": "Workflow",
+      "description": "Current retained workflow execution state. Each committed replacement updates the same run's node.",
+      "fields": [
+        {"path":"data.type","type":"string","optional":false,"description":"Registered workflow type."},
+        {"path":"data.task_queue","type":"string","optional":false,"description":"Workflow task queue."},
+        {"path":"data.state","type":"string","optional":false,"enum":["Unspecified","Created","Running","Completed","Zombie","Void","Corrupted"],"description":"Internal execution state. Use data.status for workflow outcomes."},
+        {"path":"data.status","type":"string","optional":false,"enum":["Unspecified","Running","Completed","Failed","Canceled","Terminated","ContinuedAsNew","TimedOut","Paused"],"description":"Workflow execution status. These case-sensitive strings differ from protobuf enum names."},
+        {"path":"data.start_time","type":"string","format":"date-time","optional":true,"description":"Execution start time."},
+        {"path":"data.execution_time","type":"string","format":"date-time","optional":true,"description":"Execution time after any configured start delay."},
+        {"path":"data.close_time","type":"string","format":"date-time","optional":true,"description":"Time the execution closed."},
+        {"path":"data.first_run_id","type":"string","optional":true,"description":"First run in this execution chain."},
+        {"path":"data.previous_run_id","type":"string","optional":true,"description":"Previous run in a continued execution chain, when known."},
+        {"path":"data.new_run_id","type":"string","optional":true,"description":"New run produced when this run continues or retries."},
+        {"path":"data.reset_run_id","type":"string","optional":true,"description":"Run associated with a reset."},
+        {"path":"data.base_run_id","type":"string","optional":true,"description":"Base run associated with a reset."},
+        {"path":"data.parent_namespace_id","type":"string","optional":true,"description":"Parent workflow's namespace UUID."},
+        {"path":"data.parent_workflow_id","type":"string","optional":true,"description":"Parent workflow ID."},
+        {"path":"data.parent_run_id","type":"string","optional":true,"description":"Parent workflow's exact run ID."},
+        {"path":"data.create_request_id","type":"string","optional":true,"description":"Workflow creation request identity, useful for correlating Watch-originated starts."},
+        {"path":"data.search_attributes","type":"object","definition":"SearchAttribute","optional":true,"description":"Map from search attribute names to typed decoded values. Access a named attribute's .type and .value; raw Payloads are not exposed."}
+      ]
+    },
+    {
+      "label": "Activity",
+      "description": "Current retained workflow activity or standalone activity state. Removed activities are not reconstructed from older history.",
+      "fields": [
+        {"path":"data.id","type":"string","optional":false,"description":"Activity ID."},
+        {"path":"data.scheduled_event_id","type":"integer","optional":true,"description":"Scheduled History event ID for a workflow activity. Absent for standalone activities."},
+        {"path":"data.standalone","type":"boolean","optional":true,"description":"True for a standalone activity. False is omitted."},
+        {"path":"data.type","type":"string","optional":false,"description":"Registered activity type."},
+        {"path":"data.task_queue","type":"string","optional":false,"description":"Activity task queue."},
+        {"path":"data.attempt","type":"integer","optional":false,"description":"Current activity attempt."},
+        {"path":"data.status","type":"string","optional":false,"description":"Current projected activity lifecycle state."},
+        {"path":"data.scheduled_time","type":"string","format":"date-time","optional":true,"description":"Time the activity was scheduled."},
+        {"path":"data.started_time","type":"string","format":"date-time","optional":true,"description":"Time the current attempt started."},
+        {"path":"data.complete_time","type":"string","format":"date-time","optional":true,"description":"Activity completion time when retained."},
+        {"path":"data.retry_time","type":"string","format":"date-time","optional":true,"description":"Time of a scheduled retry."},
+        {"path":"data.last_failure_time","type":"string","format":"date-time","optional":true,"description":"Time of the last retained failure."},
+        {"path":"data.last_failure_kind","type":"string","optional":true,"description":"Failure category, without failure messages or details."},
+        {"path":"data.last_timeout_type","type":"string","optional":true,"enum":["StartToClose","ScheduleToStart","ScheduleToClose","Heartbeat"],"description":"Last timeout category. An unspecified timeout is omitted."},
+        {"path":"data.paused","type":"boolean","optional":true,"description":"True while paused. False is omitted."},
+        {"path":"data.cancel_requested","type":"boolean","optional":true,"description":"True after cancellation is requested. False is omitted."}
+      ]
+    },
+    {
+      "label": "Timer",
+      "description": "A retained workflow timer. Reusing a timer ID does not reuse its graph identity.",
+      "fields": [
+        {"path":"data.id","type":"string","optional":false,"description":"User-supplied timer ID."},
+        {"path":"data.started_event_id","type":"integer","optional":false,"description":"History event ID that identifies this timer instance."},
+        {"path":"data.deadline","type":"string","format":"date-time","optional":true,"description":"Committed timer deadline, when available."},
+        {"path":"data.status","type":"string","optional":false,"enum":["SCHEDULED","FIRE_BUFFERED"],"description":"FIRE_BUFFERED is not a finalized firing. A committed Fact with transition FIRED records the finalized firing."}
+      ]
+    },
+    {
+      "label": "Fact",
+      "description": "A committed lifecycle transition, distinct from current retained state. Facts can describe transitions that do not have a separate History event.",
+      "fields": [
+        {"path":"data.entity","type":"string","optional":false,"description":"Entity category whose transition was committed."},
+        {"path":"data.id","type":"string","optional":false,"description":"Entity ID within the execution."},
+        {"path":"data.scheduled_event_id","type":"integer","optional":true,"description":"Activity scheduled event ID, when applicable."},
+        {"path":"data.attempt","type":"integer","optional":true,"description":"Activity attempt, when applicable."},
+        {"path":"data.transition","type":"string","optional":false,"description":"Committed transition, such as STARTED, COMPLETED, FAILED or FIRED."},
+        {"path":"data.event_id","type":"integer","optional":true,"description":"History event ID if the transition has a finalized History event."},
+        {"path":"data.time","type":"string","format":"date-time","optional":true,"description":"Transition time."},
+        {"path":"data.failure_kind","type":"string","optional":true,"description":"Failure category without messages, details or payloads."},
+        {"path":"data.timeout_type","type":"string","optional":true,"enum":["StartToClose","ScheduleToStart","ScheduleToClose","Heartbeat"],"description":"Timeout category. An unspecified timeout is omitted."}
+      ]
+    }
+  ],
+  "relationships": [
+    {"label":"HAS_ACTIVITY","from":"Workflow","to":"Activity","description":"Links a workflow to a retained workflow activity. Standalone activities have no workflow-owner edge."},
+    {"label":"HAS_TIMER","from":"Workflow","to":"Timer","description":"Links a workflow to a retained timer."}
+  ],
+  "definitions": {
+    "SearchAttribute": {
+      "description": "Each entry in data.search_attributes contains a declared type and a decoded JSON value.",
+      "fields": [
+        {"path":"type","type":"string","optional":false,"enum":["Unspecified","Text","Keyword","Int","Double","Bool","Datetime","KeywordList"],"description":"Declared Temporal search attribute type."},
+        {"path":"value","type":"json","optional":false,"description":"Decoded value of the declared type. Large integers retain integer precision in the native graph."}
+      ]
+    }
+  },
+  "notes": [
+    "Identity fields are directly on each node. Entity-specific fields are nested under data, for example w.workflow_id and w.data.status.",
+    "Enum strings are case-sensitive Go String() values, not protobuf JSON names. A completed workflow has data.status = 'Completed'.",
+    "date-time fields contain RFC3339 timestamps. Optional fields may be absent; omission is not an empty string, false or a fabricated value.",
+    "This source contains committed state, not uncommitted changes or raw History payloads. Workflow inputs/results, activity inputs/results, failure details and heartbeat contents are excluded.",
+    "The projection is scoped to the current namespace and retained executions. It is not a global atomic snapshot or a transaction shared with an external database.",
+    "A connector configuration schema describes connection settings. It is not the graph-data schema described here."
+  ]
+}

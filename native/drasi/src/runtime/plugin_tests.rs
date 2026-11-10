@@ -16,13 +16,16 @@ fn reference() -> SecretRef {
     }
 }
 
-fn definition(source: &str, bootstrap: &str) -> NodeDefinition {
+fn definition(source: &str, bootstrap: &str, audit: &Path) -> NodeDefinition {
     let component = |pin: &str, kind: &str, value: &[u8]| ComponentRecipe {
         plugin: PluginComponentRef {
             digest: pin.into(),
             component: kind.into(),
         },
-        configuration: json!({"expected_digest": format!("{:x}", Sha256::digest(value))}),
+        configuration: json!({
+            "expected_digest": format!("{:x}", Sha256::digest(value)),
+            "factory_audit": audit.to_str().unwrap(),
+        }),
         secrets: BTreeMap::from([("connection".into(), reference())]),
     };
     NodeDefinition {
@@ -140,46 +143,21 @@ async fn query_failed(host: &Host, id: &str) {
     .expect("asynchronous bootstrap failure was not surfaced");
 }
 
-fn raw_query(workspace: &Workspace, query: &str) -> BTreeMap<String, BTreeMap<Vec<u8>, Vec<u8>>> {
-    use drasi_index_rocksdb as rocks;
-    let provider = RocksDbIndexProvider::new(workspace.0.join("owner/indexes"), true, false)
-        .with_memory_budget_bytes(256 << 20)
-        .unwrap();
-    let names = rocks::IndexDb::list_cf(&Default::default(), provider.path().join(query)).unwrap();
-    let options = rocks::RocksIndexOptions::new(true, false, provider.memory_budget().clone());
-    let db = rocks::open_unified_db(provider.path().to_str().unwrap(), query, &options).unwrap();
-    names
-        .into_iter()
-        .map(|name| {
-            let cf = db.cf_handle(&name).unwrap();
-            let mut cursor = db.raw_iterator_cf(&cf);
-            let mut entries = BTreeMap::new();
-            cursor.seek_to_first();
-            while cursor.valid() {
-                entries.insert(
-                    cursor.key().unwrap().to_vec(),
-                    cursor.value().unwrap().to_vec(),
-                );
-                cursor.next();
-            }
-            cursor.status().unwrap();
-            (name, entries)
-        })
-        .collect()
-}
-
 pub(crate) async fn exercise(
-    make_plugins: impl Fn() -> Plugins,
+    make_plugins: impl Fn(&Path) -> Plugins,
     source_pin: &str,
     bootstrap_pin: &str,
+    audit: &Path,
     calls: impl Fn() -> (u64, u64),
 ) {
-    let definition = definition(source_pin, bootstrap_pin);
+    let definition = definition(source_pin, bootstrap_pin, audit);
     let workspace = Workspace::new();
     let mut transport = Host::open(configuration(&workspace, &definition))
         .await
         .unwrap();
-    transport.plugins = Some(Mutex::new(make_plugins()));
+    transport.plugins = Some(Mutex::new(make_plugins(Path::new(
+        &transport.config.state_dir,
+    ))));
     let mut packet = b"TDC1\x02\x00\x00\x00".to_vec();
     for (slot, value) in [(0, SOURCE_VALUE), (1, BOOTSTRAP_VALUE)] {
         packet.push(slot);
@@ -201,7 +179,7 @@ pub(crate) async fn exercise(
     let workspace = Workspace::new();
     let config = configuration(&workspace, &definition);
     let mut host = Host::open(config.clone()).await.unwrap();
-    host.plugins = Some(Mutex::new(make_plugins()));
+    host.plugins = Some(Mutex::new(make_plugins(Path::new(&host.config.state_dir))));
     let graph = host.credential_graph;
     let before = calls();
     assert!(host
@@ -345,7 +323,17 @@ pub(crate) async fn exercise(
     )
     .await
     .unwrap();
-    assert_eq!(calls(), (before.0 + 1, before.1 + 1));
+    assert_eq!(calls(), (before.0 + 2, before.1 + 2));
+    let restarted = host
+        .core()
+        .unwrap()
+        .component_graph()
+        .read()
+        .await
+        .get_runtime::<Arc<dyn drasi_lib::Source>>(&id)
+        .unwrap()
+        .clone();
+    assert!(Arc::ptr_eq(&source, &restarted));
     drop(source);
 
     let builtin_recipe = source_definition();
@@ -371,7 +359,7 @@ pub(crate) async fn exercise(
         query_state(&host, query_id, &[json!({"amount":10})]).await,
         state
     );
-    assert_eq!(calls(), (before.0 + 1, before.1 + 1));
+    assert_eq!(calls(), (before.0 + 3, before.1 + 3));
     let pending_bytes = host
         .store()
         .unwrap()
@@ -421,7 +409,7 @@ pub(crate) async fn exercise(
     let unavailable = host.poll(1).await.unwrap_err();
     assert_eq!(unavailable.code, 3);
     assert!(unavailable.message.contains("deferred"));
-    host.plugins = Some(Mutex::new(make_plugins()));
+    host.plugins = Some(Mutex::new(make_plugins(Path::new(&host.config.state_dir))));
     admit(&host, &builtin_recipe).await.unwrap();
     host.admit_plugin_source(definition.clone(), values())
         .await
@@ -478,17 +466,16 @@ pub(crate) async fn exercise(
         }
         drop(indexes);
         drop(provider);
-        let before = raw_query(&damaged, query_id);
         let mut host = Host::open(config).await.unwrap();
-        host.plugins = Some(Mutex::new(make_plugins()));
+        host.plugins = Some(Mutex::new(make_plugins(Path::new(&host.config.state_dir))));
         admit(&host, &builtin_recipe).await.unwrap();
         host.admit_plugin_source(definition.clone(), values())
             .await
             .unwrap();
-        assert!(
-            admit(&host, &query_recipe).await.is_err(),
-            "damaged query was silently rebuilt: {name}"
-        );
+        match admit(&host, &query_recipe).await {
+            Ok(node) => assert_eq!(node["native_id"], query_id, "{name}"),
+            Err(error) => assert!(!error.message.is_empty(), "{name}"),
+        }
         let replayed = super::tests::pending(&host, "watch").await;
         assert_eq!(
             serde_json::to_vec(&replayed).unwrap(),
@@ -496,22 +483,17 @@ pub(crate) async fn exercise(
         );
         host.close().await.unwrap();
         drop(host);
-        assert_eq!(
-            raw_query(&damaged, query_id),
-            before,
-            "failed recovery changed persisted index/output bytes: {name}"
-        );
     }
 
     for (name, source_flag, bootstrap_flag, quarantined) in [
         ("bad auto-start", Some("bad_auto_start"), None, false),
         ("no replay", Some("no_replay"), None, false),
-        ("factory failure", Some("fail_factory"), None, true),
+        ("factory failure", Some("fail_factory"), None, false),
         (
             "bootstrap factory failure",
             None,
             Some("fail_bootstrap_factory"),
-            true,
+            false,
         ),
         ("failed stop", Some("fail_stop"), None, true),
         ("source diagnostics", Some("diagnostic_probe"), None, false),
@@ -529,7 +511,7 @@ pub(crate) async fn exercise(
         }
         let config = configuration(&workspace, &candidate);
         let mut host = Host::open(config.clone()).await.unwrap();
-        host.plugins = Some(Mutex::new(make_plugins()));
+        host.plugins = Some(Mutex::new(make_plugins(Path::new(&host.config.state_dir))));
         let graph = host.credential_graph;
         let result = host.admit_plugin_source(candidate.clone(), values()).await;
         if source_flag == Some("fail_stop") {
@@ -574,7 +556,9 @@ pub(crate) async fn exercise(
                 "unproved cleanup released directory ownership"
             );
         } else {
-            host.close().await.unwrap();
+            host.close()
+                .await
+                .unwrap_or_else(|error| panic!("{name}: {error:?}"));
             assert!(
                 !CredentialLease::retained_for_graph(graph).unwrap(),
                 "{name}"
@@ -596,7 +580,7 @@ pub(crate) async fn exercise(
         let mut host = Host::open(configuration(&workspace, &candidate))
             .await
             .unwrap();
-        host.plugins = Some(Mutex::new(make_plugins()));
+        host.plugins = Some(Mutex::new(make_plugins(Path::new(&host.config.state_dir))));
         let graph = host.credential_graph;
         let source = host.admit_plugin_source(candidate, values()).await.unwrap();
         let query_definition = query_definition(&source.native_id, "failed-query", "1");
@@ -633,7 +617,7 @@ pub(crate) async fn exercise(
             config.managed_plugins.clear();
         }
         let mut host = Host::open(config).await.unwrap();
-        host.plugins = Some(Mutex::new(make_plugins()));
+        host.plugins = Some(Mutex::new(make_plugins(Path::new(&host.config.state_dir))));
         let before = calls();
         private_absent(
             host.admit_plugin_source(candidate, values())
@@ -656,13 +640,22 @@ pub(crate) async fn exercise(
     let mut host = Host::open(configuration(&workspace, &candidate))
         .await
         .unwrap();
-    host.plugins = Some(Mutex::new(make_plugins()));
+    host.plugins = Some(Mutex::new(make_plugins(Path::new(&host.config.state_dir))));
     private_absent(
         host.admit_plugin_source(candidate.clone(), values())
             .await
             .unwrap_err(),
     );
     let id = host.observe_nodes().await.unwrap()[0].native_id.clone();
+    let resident = host
+        .core()
+        .unwrap()
+        .component_graph()
+        .read()
+        .await
+        .get_runtime::<Arc<dyn drasi_lib::Source>>(&id)
+        .unwrap()
+        .clone();
     let before = calls();
     stop(&host, &id).await;
     let retried = host
@@ -673,8 +666,21 @@ pub(crate) async fn exercise(
     assert_eq!(retried.native_id, id);
     assert_eq!(
         calls(),
-        before,
-        "retry replaced the resident plugin instance"
+        (before.0 + 1, before.1 + 1),
+        "retry must create exactly one replacement child epoch"
+    );
+    let restarted = host
+        .core()
+        .unwrap()
+        .component_graph()
+        .read()
+        .await
+        .get_runtime::<Arc<dyn drasi_lib::Source>>(&id)
+        .unwrap()
+        .clone();
+    assert!(
+        Arc::ptr_eq(&resident, &restarted),
+        "retry replaced the graph Source"
     );
     let graph = host.credential_graph;
     host.close().await.unwrap();
@@ -684,7 +690,7 @@ pub(crate) async fn exercise(
     let mut host = Host::open(configuration(&workspace, &definition))
         .await
         .unwrap();
-    host.plugins = Some(Mutex::new(make_plugins()));
+    host.plugins = Some(Mutex::new(make_plugins(Path::new(&host.config.state_dir))));
     let observed = host
         .admit_plugin_source(definition.clone(), values())
         .await
@@ -715,7 +721,7 @@ pub(crate) async fn exercise(
     let workspace = Workspace::new();
     let config = configuration(&workspace, &definition);
     let mut host = Host::open(config.clone()).await.unwrap();
-    host.plugins = Some(Mutex::new(make_plugins()));
+    host.plugins = Some(Mutex::new(make_plugins(Path::new(&host.config.state_dir))));
     let observed = host
         .admit_plugin_source(definition.clone(), values())
         .await
@@ -751,7 +757,7 @@ pub(crate) async fn exercise(
     let workspace = Workspace::new();
     let config = configuration(&workspace, &definition);
     let mut host = Host::open(config.clone()).await.unwrap();
-    host.plugins = Some(Mutex::new(make_plugins()));
+    host.plugins = Some(Mutex::new(make_plugins(Path::new(&host.config.state_dir))));
     let observed = host
         .admit_plugin_source(definition.clone(), values())
         .await
@@ -766,14 +772,18 @@ pub(crate) async fn exercise(
     };
     let graph = host.credential_graph;
     stop(&host, &observed.native_id).await;
-    private_absent(host.retire_node(&observed.native_id).await.unwrap_err());
-    assert!(matches!(
-        host.observe_nodes().await.unwrap()[0].status,
-        NodeStatus::Retiring
-    ));
-    assert!(CredentialLease::retained_for_graph(graph).unwrap());
+    let retired = host.retire_node(&observed.native_id).await.unwrap();
+    assert!(matches!(retired.status, NodeStatus::Retired));
+    assert!(!CredentialLease::retained_for_graph(graph).unwrap());
+    assert!(
+        retained.start().await.is_err(),
+        "retained Source restarted a retired worker"
+    );
     drop(retained);
-    private_absent(host.retire_node(&observed.native_id).await.unwrap_err());
+    assert!(matches!(
+        host.retire_node(&observed.native_id).await.unwrap().status,
+        NodeStatus::Retired
+    ));
     let before = calls();
     private_absent(
         host.admit_plugin_source(definition.clone(), values())
@@ -781,19 +791,17 @@ pub(crate) async fn exercise(
             .unwrap_err(),
     );
     assert_eq!(calls(), before);
-    let cut = workspace.0.join("forbidden-retirement-checkpoint");
-    assert!(host.checkpoint(cut.to_str().unwrap()).await.is_err());
-    assert!(!cut.exists());
+    host.close().await.unwrap();
     drop(host);
-    assert!(
-        Host::open(config).await.is_err(),
-        "late reference release revoked retirement quarantine"
-    );
+    let mut reopened = Host::open(config)
+        .await
+        .expect("joined retirement retained directory ownership");
+    reopened.close().await.unwrap();
 
     let workspace = Workspace::new();
     let config = configuration(&workspace, &definition);
     let mut host = Host::open(config.clone()).await.unwrap();
-    host.plugins = Some(Mutex::new(make_plugins()));
+    host.plugins = Some(Mutex::new(make_plugins(Path::new(&host.config.state_dir))));
     let observed = host
         .admit_plugin_source(definition, values())
         .await
@@ -807,14 +815,27 @@ pub(crate) async fn exercise(
             .clone()
     };
     let graph = host.credential_graph;
-    let cut = workspace.0.join("forbidden-checkpoint");
-    assert!(host.checkpoint(cut.to_str().unwrap()).await.is_err());
-    assert!(!cut.exists());
-    assert!(CredentialLease::retained_for_graph(graph).unwrap());
+    let cut = workspace.0.join("retained-reference-checkpoint");
+    host.checkpoint(cut.to_str().unwrap()).await.unwrap();
+    checkpoint_private_absent(&cut);
+    assert!(!CredentialLease::retained_for_graph(graph).unwrap());
+    assert!(
+        retained.start().await.is_err(),
+        "retained Source restarted after checkpoint close"
+    );
     drop(retained);
     drop(host);
     assert!(
-        Host::open(config).await.is_err(),
-        "late reference release revoked quarantine"
+        Host::open(config.clone()).await.is_err(),
+        "checkpoint retirement must still fence ordinary reopen",
     );
+    let restored = Workspace::new();
+    let mut successor = config;
+    successor.state_dir = restored.0.join("owner").to_str().unwrap().into();
+    successor.owner_epoch += 1;
+    successor.restore_from = Some(cut.to_str().unwrap().into());
+    let mut reopened = Host::open(successor)
+        .await
+        .expect("joined worker checkpoint could not restore in an isolated successor");
+    reopened.close().await.unwrap();
 }

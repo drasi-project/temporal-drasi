@@ -2,7 +2,7 @@
 set -euo pipefail
 
 cd "$(dirname "$0")/../.."
-: "${TEMPORAL_DRASI_PLUGIN_CONFIG:?Set an administrator-authored Config JSON file with trusted signed PostgreSQL source and separate bootstrap pins}"
+: "${TEMPORAL_DRASI_PLUGIN_CONFIG:?Set a Config JSON file with PostgreSQL source and bootstrap pins}"
 if [[ ! -f "$TEMPORAL_DRASI_PLUGIN_CONFIG" ]]; then
     echo "The configured plugin fixture file does not exist" >&2
     exit 1
@@ -16,4 +16,4 @@ mkdir -p "$native/.verification/build" "$native/.verification/go"
 export TMPDIR="$native/.verification/build"
 export GOTMPDIR="$native/.verification/go"
 CGO_ENABLED=1 go test -count=1 -tags test_dep,integration,temporal_with_drasi \
-    ./service/watch/native -run '^TestNativeConfiguredSignedPostgresPlugins$' -v
+    ./service/watch/native -run '^TestNativeConfiguredPostgresPlugins$' -v

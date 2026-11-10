@@ -2,7 +2,6 @@ package watch
 
 import (
 	"context"
-	"fmt"
 	"maps"
 	"slices"
 	"time"
@@ -68,8 +67,7 @@ func (s *Service) externalSourcesAvailable(ctx context.Context) (bool, error) {
 	loaded := make(map[string]bool, len(observed.Observations))
 	for _, observation := range observed.Observations {
 		status := observation.Status
-		loaded[observation.Digest] = status.State == contractpb.PluginHostState_PLUGIN_HOST_STATE_LOADED &&
-			status.VerifiedSignerIdentity != ""
+		loaded[observation.Digest] = status.State == contractpb.PluginHostState_PLUGIN_HOST_STATE_LOADED
 	}
 	for _, pair := range policy.ManagedPlugins {
 		if loaded[pair.Source.Digest] && loaded[pair.Bootstrap.Digest] {
@@ -271,9 +269,6 @@ func reducePluginObservations(hostID string, load bool, samples []runtimePluginO
 		if load {
 			status.Message = "Plugin loading is pending in one or more local runtimes"
 		}
-	}
-	if signer := samples[0].signer; signer.Issuer != "" && signer.Subject != "" {
-		status.VerifiedSignerIdentity = fmt.Sprintf("%s (issuer: %s)", signer.Subject, signer.Issuer)
 	}
 	return status
 }

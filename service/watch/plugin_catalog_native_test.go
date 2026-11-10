@@ -22,7 +22,7 @@ func catalogRuntime(t *testing.T, policy PluginPolicy) *Service {
 	t.Helper()
 	runtime, err := native.Open(t.Context(), native.Config{
 		StateDir: filepath.Join(t.TempDir(), "catalog"), InstanceID: "catalog", OwnerEpoch: 1,
-		StartMode: native.StartModeDormant, Catalogs: policy.Catalogs, Trust: policy.Trust, ManagedPlugins: policy.ManagedPlugins,
+		StartMode: native.StartModeDormant, Catalogs: policy.Catalogs, ManagedPlugins: policy.ManagedPlugins,
 	})
 	require.NoError(t, err)
 	t.Cleanup(func() {

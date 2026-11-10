@@ -222,17 +222,8 @@ func validatePluginHostStatus(status *contractpb.PluginHostStatus, now time.Time
 		!utf8.ValidString(status.Message) || !utf8.ValidString(status.VerifiedSignerIdentity) {
 		return serviceerror.NewDataLoss("Watch member returned invalid plugin status")
 	}
-	switch status.State {
-	case contractpb.PluginHostState_PLUGIN_HOST_STATE_UNSPECIFIED:
-		if status.VerifiedSignerIdentity != "" || status.Message == "" {
-			return serviceerror.NewDataLoss("Watch member returned unsupported plugin evidence")
-		}
-	case contractpb.PluginHostState_PLUGIN_HOST_STATE_VERIFIED, contractpb.PluginHostState_PLUGIN_HOST_STATE_INSTALLED,
-		contractpb.PluginHostState_PLUGIN_HOST_STATE_LOADED:
-		if status.VerifiedSignerIdentity == "" {
-			return serviceerror.NewDataLoss("Watch member plugin success has no verified signer")
-		}
-	default:
+	if status.State == contractpb.PluginHostState_PLUGIN_HOST_STATE_UNSPECIFIED && status.Message == "" {
+		return serviceerror.NewDataLoss("Watch member returned unsupported plugin evidence")
 	}
 	if status.State == contractpb.PluginHostState_PLUGIN_HOST_STATE_UNSPECIFIED && status.UpdatedAt == nil {
 		return nil

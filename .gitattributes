@@ -1,5 +1,2 @@
 *.png filter=lfs diff=lfs merge=lfs -text
 *.jpg filter=lfs diff=lfs merge=lfs -text
-
-# Pinned upstream patches require their literal diff-context whitespace.
-native/drasi/patches/*.patch -whitespace

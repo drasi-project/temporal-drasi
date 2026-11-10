@@ -1,20 +1,20 @@
+#[cfg(test)]
+use self::native::LoadedPlugin;
+use self::worker::{TrustedArtifact, WorkerDescriptor, WorkerSource, WorkerSpec};
 use crate::protocol::*;
-use drasi_host_sdk::{
-    callbacks::{redacted_lifecycle_callback, redacted_log_callback},
-    loader::load_plugin_from_path,
-    registry::{
-        matches_trusted_identity, CosignVerifier, LocalDirRegistry, LocalPluginInfo,
-        OciRegistryClient, PluginMetadataJson, RegistryConfig, SignatureStatus, TrustedIdentity,
-        VerificationConfig, VerificationResult,
-    },
-    LoadedPlugin,
+use drasi_host_sdk::registry::{
+    LocalDirRegistry, LocalPluginInfo, OciRegistryClient, PluginMetadataJson, RegistryConfig,
 };
+#[cfg(test)]
 use drasi_plugin_sdk::{
     descriptor::{
         BootstrapPluginDescriptor, IdentityProviderPluginDescriptor, ReactionPluginDescriptor,
         SecretStorePluginDescriptor, SourcePluginDescriptor,
     },
-    ffi::metadata::{PluginMetadata, FFI_SDK_VERSION, TARGET_TRIPLE},
+    ffi::metadata::PluginMetadata,
+};
+use drasi_plugin_sdk::{
+    ffi::metadata::{FFI_SDK_VERSION, TARGET_TRIPLE},
     SDK_VERSION,
 };
 use serde::{Deserialize, Serialize};
@@ -27,15 +27,17 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
+mod companion;
 pub(crate) mod managed;
+pub(crate) mod native;
 #[cfg(test)]
 mod postgres_tests;
 mod schema;
+pub(crate) mod worker;
 
 pub struct Plugins {
     loaded: BTreeMap<String, ActivePlugin>,
     catalogs: Vec<CatalogConfig>,
-    trust: Trust,
     directory: PathBuf,
     host_id: String,
     observations: BTreeMap<String, PluginObservation>,
@@ -43,22 +45,22 @@ pub struct Plugins {
 
 struct ActivePlugin {
     reference: String,
-    handle: Arc<LoadedPlugin>,
+    artifact: TrustedArtifact,
     descriptors: Vec<PluginDescriptor>,
 }
 
-// A process may initialize one immutable artifact for each plugin identity.
-type Resident = Arc<OnceLock<Result<Arc<LoadedPlugin>>>>;
+// A process may admit one immutable artifact for each plugin identity.
+type Resident = Arc<tokio::sync::OnceCell<Result<Vec<PluginDescriptor>>>>;
 static RESIDENT: OnceLock<Mutex<BTreeMap<String, (String, Resident)>>> = OnceLock::new();
+const CORE_VERSION: &str = env!("TDRASI_CORE_VERSION");
+const LIB_VERSION: &str = env!("TDRASI_LIB_VERSION");
 
 #[derive(Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 struct InstalledArtifact {
     reference: String,
     binary_sha256: String,
     filename: String,
     metadata: PluginMetadataJson,
-    signer: Identity,
 }
 
 struct Staging(PathBuf);
@@ -98,7 +100,7 @@ fn hex_digest(value: &str) -> bool {
             .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
 }
 
-pub fn validate_policy(plugin: &PluginConfig, trust: &Trust) -> Result<()> {
+pub fn validate_policy(plugin: &PluginConfig) -> Result<()> {
     identifier(&plugin.id)?;
     identifier(plugin.filename.split('.').next().unwrap_or_default())?;
     if plugin.filename.contains('/')
@@ -117,7 +119,7 @@ pub fn validate_policy(plugin: &PluginConfig, trust: &Trust) -> Result<()> {
             "plugin reference must be pinned by SHA-256 manifest digest",
         )
     })?;
-    if !valid_repository(repository)
+    if (repository != "local" && !valid_repository(repository))
         || !hex_digest(digest)
         || !hex_digest(&plugin.binary_sha256)
         || plugin
@@ -127,25 +129,18 @@ pub fn validate_policy(plugin: &PluginConfig, trust: &Trust) -> Result<()> {
     {
         return Err(Error::new(1, "invalid plugin SHA-256 digest"));
     }
-    if !trust
-        .registry_prefixes
-        .iter()
-        .any(|prefix| valid_repository(prefix) && repository.starts_with(&format!("{prefix}/")))
-        || trust.identities.is_empty()
-        || trust
-            .identities
-            .iter()
-            .any(|identity| identity.issuer.is_empty() || identity.subject.is_empty())
+    if repository == "local"
+        && (plugin.local_catalog_path.is_none() || digest != plugin.binary_sha256)
     {
         return Err(Error::new(
             1,
-            "plugin registry and signing identities must be explicitly trusted",
+            "local plugin requires an absolute library path and its binary digest",
         ));
     }
     Ok(())
 }
 
-pub fn validate_catalogs(catalogs: &[CatalogConfig], trust: &Trust) -> Result<()> {
+pub fn validate_catalogs(catalogs: &[CatalogConfig]) -> Result<()> {
     let mut ids = BTreeSet::new();
     let mut releases = BTreeSet::new();
     let mut digests = BTreeSet::new();
@@ -160,7 +155,7 @@ pub fn validate_catalogs(catalogs: &[CatalogConfig], trust: &Trust) -> Result<()
         }
         for release in &catalog.plugins {
             count += 1;
-            validate_policy(&release.artifact, trust)?;
+            validate_policy(&release.artifact)?;
             if release.version.is_empty()
                 || release.version.len() > 128
                 || !release
@@ -180,29 +175,10 @@ pub fn validate_catalogs(catalogs: &[CatalogConfig], trust: &Trust) -> Result<()
     Ok(())
 }
 
-fn verified(status: SignatureStatus, identities: &[TrustedIdentity]) -> Result<Identity> {
-    match status {
-        SignatureStatus::Verified(result) if matches_trusted_identity(&result, identities) => {
-            Ok(Identity {
-                issuer: result.issuer,
-                subject: result.subject,
-            })
-        }
-        SignatureStatus::Verified(_) => Err(Error::new(
-            3,
-            "plugin signature has an untrusted signing identity",
-        )),
-        SignatureStatus::Unsigned => Err(Error::new(3, "unsigned native plugins are not allowed")),
-        SignatureStatus::Tampered(_) => {
-            Err(Error::new(3, "native plugin signature verification failed"))
-        }
-    }
-}
-
 fn compatible(metadata: &PluginMetadataJson) -> bool {
     metadata.sdk_version == SDK_VERSION
-        && metadata.core_version == drasi_core::VERSION
-        && metadata.lib_version == drasi_lib::VERSION
+        && metadata.core_version == CORE_VERSION
+        && metadata.lib_version == LIB_VERSION
         && metadata.target_triple == TARGET_TRIPLE
 }
 
@@ -224,6 +200,30 @@ fn check_binary(path: &Path, expected: &str) -> Result<()> {
     Ok(())
 }
 
+fn local_metadata(plugin: &PluginConfig) -> Result<PluginMetadataJson> {
+    let path = Path::new(
+        plugin
+            .local_catalog_path
+            .as_ref()
+            .ok_or_else(|| Error::new(1, "local plugin library path is missing"))?,
+    );
+    check_binary(path, &plugin.binary_sha256)?;
+    let metadata_path = path
+        .parent()
+        .ok_or_else(|| Error::new(1, "local plugin directory is missing"))?
+        .join("metadata.json");
+    let metadata = std::fs::symlink_metadata(&metadata_path).map_err(io)?;
+    if !metadata.is_file() || metadata.len() > MAX_INPUT as u64 {
+        return Err(Error::new(
+            3,
+            "local plugin metadata is not a bounded regular file",
+        ));
+    }
+    Ok(serde_json::from_slice(
+        &std::fs::read(metadata_path).map_err(io)?,
+    )?)
+}
+
 fn digest(plugin: &PluginConfig) -> String {
     plugin
         .reference
@@ -237,14 +237,13 @@ impl Plugins {
     pub async fn open(
         config: &[PluginConfig],
         catalogs: &[CatalogConfig],
-        trust: &Trust,
         directory: &Path,
         host_id: &str,
     ) -> Result<Self> {
-        validate_catalogs(catalogs, trust)?;
+        validate_catalogs(catalogs)?;
         let mut ids = BTreeSet::new();
         for artifact in config {
-            validate_policy(artifact, trust)?;
+            validate_policy(artifact)?;
             if !ids.insert(&artifact.id) {
                 return Err(Error::new(1, "duplicate startup plugin id"));
             }
@@ -266,7 +265,6 @@ impl Plugins {
         let mut plugins = Self {
             loaded: BTreeMap::new(),
             catalogs,
-            trust: trust.clone(),
             directory: directory.into(),
             host_id: host_id.into(),
             observations: BTreeMap::new(),
@@ -283,23 +281,8 @@ impl Plugins {
         Ok(plugins)
     }
 
-    fn identities(&self) -> Vec<TrustedIdentity> {
-        self.trust
-            .identities
-            .iter()
-            .map(|identity| TrustedIdentity {
-                issuer: identity.issuer.clone(),
-                subject_pattern: identity.subject.clone(),
-            })
-            .collect()
-    }
-
     fn client(&self) -> OciRegistryClient {
-        let verifier = CosignVerifier::new(VerificationConfig {
-            enabled: true,
-            trusted_identities: self.identities(),
-        });
-        OciRegistryClient::with_verifier(RegistryConfig::default(), verifier)
+        OciRegistryClient::new(RegistryConfig::default())
     }
 
     pub fn catalogs(&self) -> Vec<Catalog> {
@@ -386,6 +369,9 @@ impl Plugins {
         let release = self.release(selection)?;
         let metadata = match self.cached(&release.artifact) {
             Ok(Some(installed)) => Ok(installed.metadata),
+            Ok(None) if release.artifact.reference.starts_with("local@") => {
+                local_metadata(&release.artifact)
+            }
             Ok(None) => self
                 .client()
                 .fetch_metadata(&release.artifact.reference)
@@ -398,7 +384,7 @@ impl Plugins {
             Err(_) => "configured artifact metadata could not be fetched".into(),
             Ok(_) if !plugin.compatible => format!(
                 "require SDK {SDK_VERSION}, core {}, lib {} and target {TARGET_TRIPLE}; binary ABI {FFI_SDK_VERSION} is checked before initialization",
-                drasi_core::VERSION, drasi_lib::VERSION
+                CORE_VERSION, LIB_VERSION
             ),
             Ok(_) => String::new(),
         };
@@ -489,17 +475,10 @@ impl Plugins {
             || installed.filename != plugin.filename
             || installed.binary_sha256 != plugin.binary_sha256
             || !compatible(&installed.metadata)
-            || !matches_trusted_identity(
-                &VerificationResult {
-                    issuer: installed.signer.issuer.clone(),
-                    subject: installed.signer.subject.clone(),
-                },
-                &self.identities(),
-            )
         {
             return Err(Error::new(
                 3,
-                "plugin cache does not match the configured artifact and trust policy",
+                "plugin cache does not match the configured artifact",
             ));
         }
         check_binary(&directory.join(&plugin.filename), &plugin.binary_sha256)?;
@@ -511,7 +490,6 @@ impl Plugins {
         plugin: DiscoveredPlugin,
         state: PluginHostState,
         message: &str,
-        signer: Option<Identity>,
     ) -> PluginObservation {
         let observation = PluginObservation {
             plugin,
@@ -522,7 +500,7 @@ impl Plugins {
                 .duration_since(UNIX_EPOCH)
                 .unwrap_or_default()
                 .as_millis() as u64,
-            verified_signer_identity: signer,
+            verified_signer_identity: None,
         };
         self.observations
             .insert(observation.plugin.digest.clone(), observation.clone());
@@ -535,42 +513,40 @@ impl Plugins {
         version: Option<&str>,
     ) -> Result<InstalledArtifact> {
         let client = self.client();
-        let signer = verified(
-            client
-                .verifier()
-                .verify_plugin(&plugin.reference, &client.auth())
-                .await,
-            &self.identities(),
-        )?;
-        if client
-            .get_digest(&plugin.reference)
-            .await
-            .map_err(|_| Error::new(7, "configured artifact manifest could not be fetched"))?
-            != digest(plugin)
+        let local = plugin.reference.starts_with("local@");
+        if !local
+            && client
+                .get_digest(&plugin.reference)
+                .await
+                .map_err(|_| Error::new(7, "configured artifact manifest could not be fetched"))?
+                != digest(plugin)
         {
             return Err(Error::new(
                 3,
                 "registry manifest differs from the configured digest",
             ));
         }
-        let metadata = client
-            .fetch_metadata(&plugin.reference)
-            .await
-            .map_err(|_| Error::new(7, "configured artifact metadata could not be fetched"))?;
+        let metadata = if local {
+            local_metadata(plugin)?
+        } else {
+            client
+                .fetch_metadata(&plugin.reference)
+                .await
+                .map_err(|_| Error::new(7, "configured artifact metadata could not be fetched"))?
+        };
         if !compatible(&metadata) || version.is_some_and(|v| v != metadata.version) {
             return Err(Error::new(
                 3,
                 "incompatible plugin release, SDK, core, lib or target",
             ));
         }
-        if let Some(mut installed) = self.cached(plugin)? {
+        if let Some(installed) = self.cached(plugin)? {
             if serde_json::to_vec(&installed.metadata)? != serde_json::to_vec(&metadata)? {
                 return Err(Error::new(
                     3,
-                    "cached metadata differs from the signed artifact",
+                    "cached metadata differs from the pinned artifact",
                 ));
             }
-            installed.signer = signer;
             return Ok(installed);
         }
         let staging = Staging(
@@ -578,19 +554,21 @@ impl Plugins {
                 .join(format!(".install-{}", uuid::Uuid::new_v4())),
         );
         std::fs::create_dir_all(&staging.0).map_err(io)?;
-        let downloaded = client
-            .download_plugin(&plugin.reference, &staging.0, &plugin.filename)
-            .await
-            .map_err(|_| Error::new(7, "configured plugin download failed"))?;
-        verified(downloaded.verification, &self.identities())?;
-        check_binary(&downloaded.path, &plugin.binary_sha256)?;
+        let destination = staging.0.join(&plugin.filename);
+        if !local {
+            let downloaded = client
+                .download_plugin(&plugin.reference, &staging.0, &plugin.filename)
+                .await
+                .map_err(|_| Error::new(7, "configured plugin download failed"))?;
+            check_binary(&downloaded.path, &plugin.binary_sha256)?;
+        }
         if let Some(local) = &plugin.local_catalog_path {
             let path = Path::new(local);
             check_binary(path, &plugin.binary_sha256)?;
             let parent = path
                 .parent()
                 .ok_or_else(|| Error::new(1, "invalid local catalog file"))?;
-            // SDK directory discovery dlopens unverified files, so only its copy operation is safe here.
+            // SDK directory discovery loads files before checking their content pins.
             LocalDirRegistry::new(parent)
                 .install(
                     &LocalPluginInfo {
@@ -603,14 +581,13 @@ impl Plugins {
                     &staging.0,
                 )
                 .map_err(|_| Error::new(7, "configured local mirror could not be installed"))?;
-            check_binary(&downloaded.path, &plugin.binary_sha256)?;
+            check_binary(&destination, &plugin.binary_sha256)?;
         }
         let installed = InstalledArtifact {
             reference: plugin.reference.clone(),
             binary_sha256: plugin.binary_sha256.clone(),
             filename: plugin.filename.clone(),
             metadata,
-            signer,
         };
         publish_cache(&staging.0, &self.cache_directory(plugin), &installed)?;
         Ok(installed)
@@ -641,7 +618,7 @@ impl Plugins {
                 } else {
                     PluginHostState::Installed
                 };
-                Ok(self.observe(plugin, state, "", Some(installed.signer)))
+                Ok(self.observe(plugin, state, ""))
             }
             Err(error) => {
                 let plugin = self.description(selection, &release, None);
@@ -650,7 +627,7 @@ impl Plugins {
                 } else {
                     PluginHostState::Failed
                 };
-                self.observe(plugin, state, &error.message, None);
+                self.observe(plugin, state, &error.message);
                 Err(error)
             }
         }
@@ -665,46 +642,23 @@ impl Plugins {
             if selection.catalog_id != "startup" && installed.metadata.version != release.version {
                 return Err(Error::new(
                     3,
-                    "signed artifact version differs from the configured release",
-                ));
-            }
-            // A cache receipt is not a substitute for cryptographic verification at load time.
-            let client = self.client();
-            let signer = verified(
-                client
-                    .verifier()
-                    .verify_plugin(&release.artifact.reference, &client.auth())
-                    .await,
-                &self.identities(),
-            )?;
-            let metadata = client
-                .fetch_metadata(&release.artifact.reference)
-                .await
-                .map_err(|_| Error::new(7, "configured artifact metadata could not be fetched"))?;
-            if !compatible(&metadata)
-                || serde_json::to_vec(&metadata)? != serde_json::to_vec(&installed.metadata)?
-            {
-                return Err(Error::new(
-                    3,
-                    "incompatible plugin cache metadata differs from the signed artifact",
+                    "installed artifact version differs from the configured release",
                 ));
             }
             let path = self
                 .cache_directory(&release.artifact)
                 .join(&release.artifact.filename);
-            let loaded = resident(&release.artifact, &path, &installed.metadata)?;
-            // Validate and bound schemas before exposing the factories to this runtime.
-            let descriptors = descriptors(&release.artifact.id, &loaded)?;
+            let loaded = resident(&release.artifact, &path, &installed.metadata).await?;
             self.loaded.insert(
                 release.artifact.id.clone(),
                 ActivePlugin {
                     reference: release.artifact.reference.clone(),
-                    handle: loaded,
-                    descriptors,
+                    artifact: loaded.artifact,
+                    descriptors: loaded.descriptors,
                 },
             );
             let plugin = self.description(&selection, &release, Some(&installed.metadata));
-            Ok(self.observe(plugin, PluginHostState::Loaded, "", Some(signer)))
+            Ok(self.observe(plugin, PluginHostState::Loaded, ""))
         }
         .await;
         if let Err(error) = &result {
@@ -716,7 +670,7 @@ impl Plugins {
             } else {
                 PluginHostState::Failed
             };
-            self.observe(plugin, state, &error.message, None);
+            self.observe(plugin, state, &error.message);
         }
         result
     }
@@ -735,7 +689,7 @@ impl Plugins {
                 } else {
                     PluginHostState::Incompatible
                 };
-                Ok(self.observe(plugin, state, "", Some(installed.signer)))
+                Ok(self.observe(plugin, state, ""))
             }
             Ok(None) => {
                 let previous = self.observations.get(value).cloned().ok_or_else(|| {
@@ -750,7 +704,6 @@ impl Plugins {
                         plugin,
                         PluginHostState::Failed,
                         "previously installed plugin cache is missing",
-                        None,
                     ));
                 }
                 Ok(previous)
@@ -761,7 +714,6 @@ impl Plugins {
                     plugin,
                     PluginHostState::Failed,
                     "plugin cache validation failed",
-                    None,
                 ))
             }
         }
@@ -803,46 +755,81 @@ impl Plugins {
             .and_then(|id| self.loaded.get(id))
             .ok_or_else(|| Error::new(2, "source plugin is not installed"))?;
         let descriptor = plugin
-            .handle
-            .source_plugins
+            .descriptors
             .iter()
-            .find(|descriptor| Some(descriptor.kind()) == source.plugin_kind.as_deref())
+            .find(|descriptor| {
+                descriptor.category == PluginCategory::Source
+                    && Some(descriptor.component.as_str()) == source.plugin_kind.as_deref()
+            })
             .ok_or_else(|| {
                 Error::new(2, "source descriptor is not provided by the pinned plugin")
             })?;
-        let instance = descriptor
-            .create_source(&source.id, &source.config, auto_start)
-            .await
-            .map_err(Error::from)?;
-        if !instance.supports_replay() {
+        let bootstrap = source
+            .bootstrap
+            .as_ref()
+            .ok_or_else(|| Error::new(3, "plugin source requires a pinned bootstrap provider"))?;
+        let bootstrap_plugin = self
+            .loaded
+            .get(&bootstrap.plugin)
+            .ok_or_else(|| Error::new(2, "bootstrap plugin is not installed"))?;
+        if !bootstrap_plugin.descriptors.iter().any(|descriptor| {
+            descriptor.category == PluginCategory::Bootstrap
+                && descriptor.component == bootstrap.kind
+        }) {
             return Err(Error::new(
-                3,
-                "workflow-triggering sources must support positional replay",
+                2,
+                "bootstrap descriptor is not provided by the pinned plugin",
             ));
         }
-        if let Some(bootstrap) = source.bootstrap.as_ref() {
-            let plugin = self
-                .loaded
-                .get(&bootstrap.plugin)
-                .ok_or_else(|| Error::new(2, "bootstrap plugin is not installed"))?;
-            let descriptor = plugin
-                .handle
-                .bootstrap_plugins
-                .iter()
-                .find(|descriptor| descriptor.kind() == bootstrap.kind)
-                .ok_or_else(|| {
-                    Error::new(
-                        2,
-                        "bootstrap descriptor is not provided by the pinned plugin",
-                    )
-                })?;
-            let provider = descriptor
-                .create_bootstrap_provider(&bootstrap.config, &source.config)
-                .await
-                .map_err(Error::from)?;
-            instance.set_bootstrap_provider(provider).await;
+        let component =
+            |plugin: &ActivePlugin, kind: &str, configuration: &Value| ComponentRecipe {
+                plugin: PluginComponentRef {
+                    digest: plugin
+                        .reference
+                        .rsplit_once('@')
+                        .expect("pinned artifact")
+                        .1
+                        .into(),
+                    component: kind.into(),
+                },
+                configuration: configuration.clone(),
+                secrets: BTreeMap::new(),
+            };
+        let spec = WorkerSpec {
+            identity: format!("{}/startup/{}", self.host_id, source.id),
+            source_id: source.id.clone(),
+            recipe: PluginSourceRecipe {
+                source: component(plugin, &descriptor.component, &source.config),
+                bootstrap: component(bootstrap_plugin, &bootstrap.kind, &bootstrap.config),
+            },
+            source_artifact: plugin.artifact.clone(),
+            bootstrap_artifact: bootstrap_plugin.artifact.clone(),
+            source_config: source.config.clone(),
+            bootstrap_config: bootstrap.config.clone(),
+            bootstrap_source_config: source.config.clone(),
+            state_directory: self.source_directory(&source.id)?,
+        };
+        let instance = WorkerSource::spawn(
+            &companion::path()?,
+            spec,
+            Arc::new(|_, _| anyhow::bail!("startup source has no scoped credential grant")),
+        )
+        .await
+        .map_err(|_| Error::new(3, "plugin source worker construction failed"))?;
+        Ok(Box::new(instance.with_auto_start(auto_start)))
+    }
+
+    fn source_directory(&self, id: &str) -> Result<PathBuf> {
+        identifier(id)?;
+        if !self.directory.is_absolute() {
+            return Err(Error::new(3, "plugin state directory must be absolute"));
         }
-        Ok(instance)
+        Ok(self
+            .directory
+            .parent()
+            .ok_or_else(|| Error::new(3, "plugin state directory has no native root"))?
+            .join("sources")
+            .join(id))
     }
 }
 
@@ -878,13 +865,67 @@ fn publish_cache(staging: &Path, destination: &Path, installed: &InstalledArtifa
     Ok(())
 }
 
-fn resident(
+async fn resident(
+    plugin: &PluginConfig,
+    path: &Path,
+    metadata: &PluginMetadataJson,
+) -> Result<WorkerDescriptor> {
+    check_binary(path, &plugin.binary_sha256)?;
+    let artifact = TrustedArtifact {
+        path: std::fs::canonicalize(path).map_err(io)?,
+        binary_sha256: plugin.binary_sha256.clone(),
+        sdk_version: metadata.sdk_version.clone(),
+        core_version: metadata.core_version.clone(),
+        lib_version: metadata.lib_version.clone(),
+        target_triple: metadata.target_triple.clone(),
+        plugin_version: metadata.version.clone(),
+        abi_version: FFI_SDK_VERSION.into(),
+    };
+    let slot = {
+        let mut residents = RESIDENT
+            .get_or_init(Mutex::default)
+            .lock()
+            .map_err(|_| Error::new(7, "plugin admission registry is unavailable"))?;
+        let fingerprint = format!("{}:{}", plugin.reference, plugin.binary_sha256);
+        let (pin, slot) = residents
+            .entry(plugin.id.clone())
+            .or_insert_with(|| (fingerprint.clone(), Arc::new(tokio::sync::OnceCell::new())));
+        if pin != &fingerprint {
+            return Err(Error::new(
+                3,
+                "plugin replacement: process restart required before initialization",
+            ));
+        }
+        slot.clone()
+    };
+    let descriptors = slot
+        .get_or_init(|| async {
+            let mut loaded = worker::probe(&companion::path()?, artifact.clone())
+                .await
+                .map_err(|error| Error::new(3, error.to_string()))?;
+            for descriptor in &mut loaded.descriptors {
+                descriptor.plugin.clone_from(&plugin.id);
+            }
+            Ok(loaded.descriptors)
+        })
+        .await
+        .clone()?;
+    Ok(WorkerDescriptor {
+        artifact,
+        descriptors,
+    })
+}
+
+#[cfg(test)]
+fn raw_test_resident(
     plugin: &PluginConfig,
     path: &Path,
     metadata: &PluginMetadataJson,
 ) -> Result<Arc<LoadedPlugin>> {
+    type RawResident = Arc<OnceLock<Result<Arc<LoadedPlugin>>>>;
+    static RAW_RESIDENT: OnceLock<Mutex<BTreeMap<String, (String, RawResident)>>> = OnceLock::new();
     let slot = {
-        let mut residents = RESIDENT
+        let mut residents = RAW_RESIDENT
             .get_or_init(Mutex::default)
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -905,7 +946,8 @@ fn resident(
         // Pin even rejected libraries after dlopen; native TLS destructors must never outlive their code.
         let library = unsafe { libloading::Library::new(path) }
             .map_err(|_| Error::new(7, "verified plugin library could not be opened"))?;
-        let library = Box::leak(Box::new(library));
+        let library = Arc::new(library);
+        std::mem::forget(library.clone());
         let metadata_fn = unsafe {
             library.get::<unsafe extern "C" fn() -> *const PluginMetadata>(b"drasi_plugin_metadata")
         }
@@ -924,16 +966,10 @@ fn resident(
             || target != metadata.target_triple || version != metadata.version {
             return Err(Error::new(
                 3,
-                format!("incompatible plugin binary metadata: ABI {sdk} (require {FFI_SDK_VERSION}), core {core} (signed {}), lib {lib} (signed {}), target {target} (signed {}), version {version} (signed {})", metadata.core_version, metadata.lib_version, metadata.target_triple, metadata.version),
+                format!("incompatible plugin binary metadata: ABI {sdk} (require {FFI_SDK_VERSION}), core {core} (expected {}), lib {lib} (expected {}), target {target} (expected {}), version {version} (expected {})", metadata.core_version, metadata.lib_version, metadata.target_triple, metadata.version),
             ));
         }
-        let plugin_handle = load_plugin_from_path(
-            path,
-            std::ptr::null_mut(),
-            redacted_log_callback,
-            std::ptr::null_mut(),
-            redacted_lifecycle_callback,
-        )
+        let plugin_handle = native::load(library)
         .map_err(|_| {
             Error::new(
                 7,
@@ -946,6 +982,7 @@ fn resident(
     .clone()
 }
 
+#[cfg(test)]
 fn descriptors(id: &str, plugin: &LoadedPlugin) -> Result<Vec<PluginDescriptor>> {
     let mut result = Vec::new();
     macro_rules! describe {
@@ -1028,16 +1065,6 @@ mod tests {
         }
     }
 
-    fn trust() -> Trust {
-        Trust {
-            registry_prefixes: vec!["registry.example/trusted".into()],
-            identities: vec![Identity {
-                issuer: "issuer".into(),
-                subject: "subject".into(),
-            }],
-        }
-    }
-
     fn artifact() -> PluginConfig {
         PluginConfig {
             id: "test-plugin".into(),
@@ -1077,15 +1104,15 @@ mod tests {
             plugin_type: "source".into(),
             version: "1.0.0".into(),
             sdk_version: SDK_VERSION.into(),
-            core_version: drasi_core::VERSION.into(),
-            lib_version: drasi_lib::VERSION.into(),
+            core_version: CORE_VERSION.into(),
+            lib_version: LIB_VERSION.into(),
             target_triple: TARGET_TRIPLE.into(),
             description: None,
             license: None,
         }
     }
 
-    // Synthetic receipts exercise cache invariants, not signature verification.
+    // Synthetic receipts exercise content pinning without loading fixture bytes.
     fn seed_cache(plugins: &Plugins, artifact: &PluginConfig, bytes: &[u8]) -> PathBuf {
         let staging = Staging(
             plugins
@@ -1099,10 +1126,6 @@ mod tests {
             binary_sha256: artifact.binary_sha256.clone(),
             filename: artifact.filename.clone(),
             metadata: metadata(),
-            signer: Identity {
-                issuer: "issuer".into(),
-                subject: "subject".into(),
-            },
         };
         let destination = plugins.cache_directory(artifact);
         publish_cache(&staging.0, &destination, &installed).unwrap();
@@ -1110,15 +1133,16 @@ mod tests {
     }
 
     #[test]
-    fn catalog_policy_rejects_unpinned_untrusted_and_ambiguous_releases() {
+    fn catalog_policy_rejects_unpinned_and_ambiguous_releases() {
         let plugin = artifact();
-        assert!(validate_policy(&plugin, &trust()).is_ok());
+        assert!(validate_policy(&plugin).is_ok());
+        assert!(validate_policy(&PluginConfig {
+            reference: format!("other.example/plugins/test@sha256:{}", "a".repeat(64)),
+            ..plugin.clone()
+        })
+        .is_ok());
         for reference in [
             "registry.example/trusted/source/test:latest".to_string(),
-            format!(
-                "registry.example/trusted-evil/source/test@sha256:{}",
-                "a".repeat(64)
-            ),
             format!("registry.example/trusted/../evil@sha256:{}", "a".repeat(64)),
             format!(
                 "https://registry.example/trusted/test@sha256:{}",
@@ -1126,44 +1150,31 @@ mod tests {
             ),
             format!("registry.example/trusted/test@sha256:{}", "A".repeat(64)),
         ] {
-            assert!(validate_policy(
-                &PluginConfig {
-                    reference,
-                    ..plugin.clone()
-                },
-                &trust()
-            )
+            assert!(validate_policy(&PluginConfig {
+                reference,
+                ..plugin.clone()
+            })
             .is_err());
         }
         for filename in ["../libdrasi_test.so", "nested/libdrasi_test.so", "test.txt"] {
-            assert!(validate_policy(
-                &PluginConfig {
-                    filename: filename.into(),
-                    ..plugin.clone()
-                },
-                &trust()
-            )
+            assert!(validate_policy(&PluginConfig {
+                filename: filename.into(),
+                ..plugin.clone()
+            })
             .is_err());
         }
-        assert!(validate_policy(&plugin, &Trust::default()).is_err());
-        assert!(validate_policy(
-            &PluginConfig {
-                local_catalog_path: Some("relative.so".into()),
-                ..plugin.clone()
-            },
-            &trust()
-        )
+        assert!(validate_policy(&PluginConfig {
+            local_catalog_path: Some("relative.so".into()),
+            ..plugin.clone()
+        })
         .is_err());
         let c = catalog(plugin);
-        assert!(validate_catalogs(std::slice::from_ref(&c), &trust()).is_ok());
-        assert!(validate_catalogs(&[c.clone(), c.clone()], &trust()).is_err());
-        assert!(validate_catalogs(
-            &[CatalogConfig {
-                id: "startup".into(),
-                ..c
-            }],
-            &trust()
-        )
+        assert!(validate_catalogs(std::slice::from_ref(&c)).is_ok());
+        assert!(validate_catalogs(&[c.clone(), c.clone()]).is_err());
+        assert!(validate_catalogs(&[CatalogConfig {
+            id: "startup".into(),
+            ..c
+        }])
         .is_err());
     }
 
@@ -1191,15 +1202,9 @@ mod tests {
     async fn catalog_commands_cannot_add_locations_or_policy() {
         let workspace = Workspace::new();
         let plugin = artifact();
-        let mut plugins = Plugins::open(
-            &[],
-            &[catalog(plugin.clone())],
-            &trust(),
-            &workspace.0,
-            "host",
-        )
-        .await
-        .unwrap();
+        let mut plugins = Plugins::open(&[], &[catalog(plugin.clone())], &workspace.0, "host")
+            .await
+            .unwrap();
         assert_eq!(plugins.catalogs().len(), 1);
         assert_eq!(
             plugins
@@ -1240,7 +1245,7 @@ mod tests {
         for op in [
             json!({"op":"discover_plugins","registry_prefix":"attacker.example/plugins"}),
             json!({"op":"install_plugin","selection":selection(),"digest":digest(&plugin),"path":"/arbitrary"}),
-            json!({"op":"load_plugin","digest":digest(&plugin),"trust":trust()}),
+            json!({"op":"load_plugin","digest":digest(&plugin),"trust":{}}),
         ] {
             assert!(serde_json::from_value::<Command>(op).is_err());
         }
@@ -1253,8 +1258,6 @@ mod tests {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         listener.set_nonblocking(true).unwrap();
         let registry = format!("{}/trusted", listener.local_addr().unwrap());
-        let mut trust = trust();
-        trust.registry_prefixes = vec![registry.clone()];
         let mut cached = artifact();
         cached.reference = format!("{registry}/source/test@sha256:{}", "a".repeat(64));
         let mut uncached = cached.clone();
@@ -1265,7 +1268,7 @@ mod tests {
             version: "1.0.0".into(),
             artifact: cached.clone(),
         });
-        let plugins = Plugins::open(&[], &[catalog], &trust, &workspace.0, "host")
+        let plugins = Plugins::open(&[], &[catalog], &workspace.0, "host")
             .await
             .unwrap();
         seed_cache(&plugins, &cached, b"test-binary");
@@ -1308,7 +1311,7 @@ mod tests {
         let workspace = Workspace::new();
         let artifact = artifact();
         let catalogs = [catalog(artifact.clone())];
-        let mut plugins = Plugins::open(&[], &catalogs, &trust(), &workspace.0, "host")
+        let mut plugins = Plugins::open(&[], &catalogs, &workspace.0, "host")
             .await
             .unwrap();
         assert!(plugins.installations().unwrap().is_empty());
@@ -1343,7 +1346,7 @@ mod tests {
             bytes
         );
         drop(plugins);
-        let mut reopened = Plugins::open(&[], &catalogs, &trust(), &workspace.0, "host-reopened")
+        let mut reopened = Plugins::open(&[], &catalogs, &workspace.0, "host-reopened")
             .await
             .unwrap();
         assert_eq!(
@@ -1372,15 +1375,9 @@ mod tests {
     async fn missing_cache_cannot_replay_an_installed_success_observation() {
         let workspace = Workspace::new();
         let artifact = artifact();
-        let mut plugins = Plugins::open(
-            &[],
-            &[catalog(artifact.clone())],
-            &trust(),
-            &workspace.0,
-            "host",
-        )
-        .await
-        .unwrap();
+        let mut plugins = Plugins::open(&[], &[catalog(artifact.clone())], &workspace.0, "host")
+            .await
+            .unwrap();
         let directory = seed_cache(&plugins, &artifact, b"test-binary");
         assert_eq!(
             plugins.installation(&digest(&artifact)).unwrap().state,
@@ -1393,30 +1390,189 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn changed_signer_policy_does_not_trust_a_cache_receipt() {
+    async fn unsigned_native_plugin_loads_without_a_verified_signer() {
         let workspace = Workspace::new();
-        let artifact = artifact();
+        let fixture = std::env::current_exe()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .join(format!(
+                "{}temporal_drasi_test_plugin{}",
+                std::env::consts::DLL_PREFIX,
+                std::env::consts::DLL_SUFFIX
+            ));
+        let bytes = std::fs::read(fixture).unwrap();
+        let binary_sha256 = format!("{:x}", Sha256::digest(&bytes));
+        let artifact = PluginConfig {
+            id: "unsigned-native-fixture".into(),
+            reference: format!("local@sha256:{binary_sha256}"),
+            binary_sha256,
+            local_catalog_path: Some(
+                workspace
+                    .0
+                    .join(artifact().filename)
+                    .to_str()
+                    .unwrap()
+                    .into(),
+            ),
+            ..artifact()
+        };
+        std::fs::write(artifact.local_catalog_path.as_ref().unwrap(), &bytes).unwrap();
+        std::fs::write(
+            workspace.0.join("metadata.json"),
+            serde_json::to_vec(&metadata()).unwrap(),
+        )
+        .unwrap();
         let catalogs = [catalog(artifact.clone())];
-        let plugins = Plugins::open(&[], &catalogs, &trust(), &workspace.0, "host")
+        let mut plugins = Plugins::open(&[], &catalogs, &workspace.0.join("cache"), "host")
             .await
             .unwrap();
-        seed_cache(&plugins, &artifact, b"test-binary");
-        let mut stricter = trust();
-        stricter.identities[0].subject = "different-subject".into();
-        let mut plugins = Plugins::open(&[], &catalogs, &stricter, &workspace.0, "host")
+        let selection = PluginSelection {
+            plugin_id: artifact.id.clone(),
+            ..selection()
+        };
+        assert!(plugins.inspect(&selection).await.unwrap().compatible);
+        let installed = plugins
+            .install(&selection, &digest(&artifact))
             .await
             .unwrap();
-        assert_eq!(
-            plugins
-                .load_digest(&digest(&artifact))
-                .await
-                .unwrap_err()
-                .code,
-            3
-        );
+        assert_eq!(installed.state, PluginHostState::Installed);
+        assert!(installed.verified_signer_identity.is_none());
         let observed = plugins.installation(&digest(&artifact)).unwrap();
-        assert_eq!(observed.state, PluginHostState::Failed);
+        assert_eq!(observed.state, PluginHostState::Installed);
         assert!(observed.verified_signer_identity.is_none());
+        assert!(!plugins.client().verifier().is_enabled());
+        let loaded = plugins.load_digest(&digest(&artifact)).await.unwrap();
+        assert_eq!(loaded.state, PluginHostState::Loaded);
+        assert!(loaded.verified_signer_identity.is_none());
+        assert!(loaded
+            .plugin
+            .descriptors
+            .iter()
+            .any(|d| d.category == PluginCategory::Source));
+        assert!(loaded
+            .plugin
+            .descriptors
+            .iter()
+            .any(|d| d.category == PluginCategory::Bootstrap));
+        let repeated = plugins
+            .install(&selection, &digest(&artifact))
+            .await
+            .unwrap();
+        assert_eq!(repeated.state, PluginHostState::Loaded);
+        std::fs::write(artifact.local_catalog_path.as_ref().unwrap(), b"changed").unwrap();
+        assert!(plugins
+            .install(&selection, &digest(&artifact))
+            .await
+            .unwrap_err()
+            .message
+            .contains("digest"));
+    }
+
+    #[tokio::test]
+    async fn worker_descriptors_survive_cache_relocation_and_startup_source_restarts() {
+        use drasi_lib::channels::ComponentStatus;
+
+        let workspace = Workspace::new();
+        let fixture = std::env::current_exe()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .join(format!(
+                "{}temporal_drasi_test_plugin{}",
+                std::env::consts::DLL_PREFIX,
+                std::env::consts::DLL_SUFFIX
+            ));
+        let original = workspace
+            .0
+            .join("original")
+            .join(fixture.file_name().unwrap());
+        let relocated = workspace
+            .0
+            .join("relocated")
+            .join(fixture.file_name().unwrap());
+        for path in [&original, &relocated] {
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::copy(&fixture, path).unwrap();
+        }
+        let artifact = PluginConfig {
+            id: "worker-relocation-fixture".into(),
+            binary_sha256: format!("{:x}", Sha256::digest(std::fs::read(&fixture).unwrap())),
+            ..artifact()
+        };
+        let expected = metadata();
+        let (first, repeated) = tokio::join!(
+            resident(&artifact, &original, &expected),
+            resident(&artifact, &original, &expected),
+        );
+        assert_eq!(
+            serde_json::to_value(first.unwrap().descriptors).unwrap(),
+            serde_json::to_value(repeated.unwrap().descriptors).unwrap(),
+        );
+        std::fs::remove_file(&original).unwrap();
+        let loaded = resident(&artifact, &relocated, &expected).await.unwrap();
+        assert_eq!(loaded.artifact.path, relocated);
+        let mut contradictory = loaded.artifact.clone();
+        contradictory.plugin_version = "2.0.0".into();
+        let rejected = worker::probe(&companion::path().unwrap(), contradictory)
+            .await
+            .err()
+            .unwrap()
+            .to_string();
+        assert!(rejected.starts_with("incompatible plugin binary metadata"));
+        assert!(rejected.contains("version \"1.0.0\" (expected \"2.0.0\")"));
+        let plugins = Plugins {
+            loaded: BTreeMap::from([(
+                artifact.id.clone(),
+                ActivePlugin {
+                    reference: artifact.reference.clone(),
+                    artifact: loaded.artifact,
+                    descriptors: loaded.descriptors,
+                },
+            )]),
+            catalogs: Vec::new(),
+            directory: workspace.0.join("native/plugins"),
+            host_id: "startup-fixture".into(),
+            observations: BTreeMap::new(),
+        };
+        let configuration = SourceConfig {
+            id: "startup-source".into(),
+            kind: SourceKind::Plugin,
+            plugin: Some(artifact.id.clone()),
+            plugin_kind: Some("test-source".into()),
+            config: json!({}),
+            bootstrap: Some(BootstrapConfig {
+                plugin: artifact.id.clone(),
+                kind: "test-bootstrap".into(),
+                config: json!({}),
+            }),
+        };
+        let source = plugins.source(&configuration, true).await.unwrap();
+        assert!(source.auto_start());
+        assert!(source.supports_replay());
+        for _ in 0..2 {
+            source.start().await.unwrap();
+            assert_eq!(source.status().await, ComponentStatus::Running);
+            source.stop().await.unwrap();
+            assert_eq!(source.status().await, ComponentStatus::Stopped);
+        }
+        let worker = source.as_any().downcast_ref::<WorkerSource>().unwrap();
+        worker.close().await.unwrap();
+        assert!(worker.is_joined());
+        assert!(source.start().await.is_err());
+        let changed = PluginConfig {
+            reference: format!(
+                "registry.example/trusted/source/test@sha256:{}",
+                "b".repeat(64)
+            ),
+            ..artifact
+        };
+        assert!(resident(&changed, &relocated, &expected)
+            .await
+            .err()
+            .unwrap()
+            .message
+            .contains("restart required"));
     }
 
     #[tokio::test]
@@ -1449,7 +1605,7 @@ mod tests {
             id: "resident-mismatch-fixture".into(),
             ..artifact.clone()
         };
-        assert!(resident(&rejected, &fixture, &wrong_metadata)
+        assert!(raw_test_resident(&rejected, &fixture, &wrong_metadata)
             .err()
             .unwrap()
             .message
@@ -1463,7 +1619,7 @@ mod tests {
                 let fixture = fixture.clone();
                 std::thread::spawn(move || {
                     barrier.wait();
-                    resident(&artifact, &fixture, &metadata())
+                    raw_test_resident(&artifact, &fixture, &metadata())
                 })
             })
             .collect();
@@ -1473,7 +1629,7 @@ mod tests {
             .collect();
         let first = handles[0].clone();
         assert!(handles.iter().all(|h| Arc::ptr_eq(h, &first)));
-        let second = resident(&artifact, &fixture, &metadata()).unwrap();
+        let second = raw_test_resident(&artifact, &fixture, &metadata()).unwrap();
         assert!(Arc::ptr_eq(&first, &second));
         let descriptors = descriptors(&artifact.id, &first).unwrap();
         assert_eq!(descriptors.len(), 2);
@@ -1488,21 +1644,6 @@ mod tests {
         assert_eq!(descriptors[1].component, "test-bootstrap");
         assert!(descriptors.iter().all(|d| d.supported));
         let configuration = json!({"connection":"literal-connection"});
-        let plugins = Plugins {
-            loaded: BTreeMap::from([(
-                artifact.id.clone(),
-                ActivePlugin {
-                    reference: artifact.reference.clone(),
-                    handle: first.clone(),
-                    descriptors,
-                },
-            )]),
-            catalogs: Vec::new(),
-            trust: Trust::default(),
-            directory: PathBuf::new(),
-            host_id: "fixture-host".into(),
-            observations: BTreeMap::new(),
-        };
         let source_config = SourceConfig {
             id: "managed-fixture".into(),
             kind: SourceKind::Plugin,
@@ -1511,15 +1652,18 @@ mod tests {
             config: configuration.clone(),
             bootstrap: None,
         };
-        let automatic = plugins.source(&source_config, true).await.unwrap();
+        let automatic = first.source_plugins[0]
+            .create_source(&source_config.id, &source_config.config, true)
+            .await
+            .unwrap();
         assert!(automatic.auto_start());
         assert_eq!(
             automatic.status().await,
             drasi_lib::channels::ComponentStatus::Stopped
         );
         drop(automatic);
-        let source = plugins
-            .source(&source_config, false)
+        let source = first.source_plugins[0]
+            .create_source(&source_config.id, &source_config.config, false)
             .await
             .expect("the fixture must construct a real Source across the plugin ABI");
         assert!(!source.auto_start());
@@ -1606,14 +1750,14 @@ mod tests {
             ),
             ..artifact.clone()
         };
-        let other = resident(&other_artifact, &other_fixture, &metadata()).unwrap();
+        let other = raw_test_resident(&other_artifact, &other_fixture, &metadata()).unwrap();
         crate::credentials::tests::exercise_real_plugin(
             &first,
             &digest(&artifact),
             &other,
             &digest(&other_artifact),
             || {
-                resident(
+                raw_test_resident(
                     &PluginConfig {
                         id: "resident-alias-fixture".into(),
                         ..artifact.clone()
@@ -1625,45 +1769,55 @@ mod tests {
             },
         )
         .await;
-        let other_library = Box::leak(Box::new(
-            unsafe { libloading::Library::new(&other_fixture) }.unwrap(),
-        ));
-        let source_calls =
-            unsafe { library.get::<extern "C" fn() -> u64>(b"temporal_test_source_calls") }
-                .unwrap();
-        let bootstrap_calls = unsafe {
-            other_library.get::<extern "C" fn() -> u64>(b"temporal_test_bootstrap_calls")
-        }
-        .unwrap();
+        let worker_first = resident(&artifact, &fixture, &metadata()).await.unwrap();
+        let worker_other = resident(&other_artifact, &other_fixture, &metadata())
+            .await
+            .unwrap();
+        assert_eq!(
+            serde_json::to_value(&worker_first.descriptors).unwrap(),
+            serde_json::to_value(&descriptors).unwrap(),
+        );
+        let workspace = Workspace::new();
+        let audit = workspace.0.join("factory-calls");
         crate::runtime::plugin_tests::exercise(
-            || Plugins {
+            |state| Plugins {
                 loaded: BTreeMap::from([
                     (
                         artifact.id.clone(),
                         ActivePlugin {
                             reference: artifact.reference.clone(),
-                            handle: first.clone(),
-                            descriptors: super::descriptors(&artifact.id, &first).unwrap(),
+                            artifact: worker_first.artifact.clone(),
+                            descriptors: worker_first.descriptors.clone(),
                         },
                     ),
                     (
                         other_artifact.id.clone(),
                         ActivePlugin {
                             reference: other_artifact.reference.clone(),
-                            handle: other.clone(),
-                            descriptors: super::descriptors(&other_artifact.id, &other).unwrap(),
+                            artifact: worker_other.artifact.clone(),
+                            descriptors: worker_other.descriptors.clone(),
                         },
                     ),
                 ]),
                 catalogs: Vec::new(),
-                trust: Trust::default(),
-                directory: PathBuf::new(),
+                directory: state.join("plugins"),
                 host_id: "managed-fixture-host".into(),
                 observations: BTreeMap::new(),
             },
             &digest(&artifact),
             &digest(&other_artifact),
-            || (source_calls(), bootstrap_calls()),
+            &audit,
+            || {
+                let bytes = match std::fs::read_to_string(&audit) {
+                    Ok(bytes) => bytes,
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
+                    Err(error) => panic!("factory audit read failed: {error}"),
+                };
+                (
+                    bytes.lines().filter(|line| *line == "source").count() as u64,
+                    bytes.lines().filter(|line| *line == "bootstrap").count() as u64,
+                )
+            },
         )
         .await;
         let replacement = PluginConfig {
@@ -1673,36 +1827,10 @@ mod tests {
             ),
             ..artifact
         };
-        assert!(resident(&replacement, &fixture, &metadata())
+        assert!(raw_test_resident(&replacement, &fixture, &metadata())
             .err()
             .unwrap()
             .message
             .contains("restart required"));
-    }
-
-    #[test]
-    fn signature_policy_is_fail_closed() {
-        let identities = vec![TrustedIdentity {
-            issuer: "issuer".into(),
-            subject_pattern: "subject".into(),
-        }];
-        assert!(verified(SignatureStatus::Unsigned, &identities).is_err());
-        assert!(verified(SignatureStatus::Tampered("bad".into()), &identities).is_err());
-        assert!(verified(
-            SignatureStatus::Verified(drasi_host_sdk::registry::VerificationResult {
-                issuer: "issuer".into(),
-                subject: "attacker".into(),
-            }),
-            &identities
-        )
-        .is_err());
-        assert!(verified(
-            SignatureStatus::Verified(drasi_host_sdk::registry::VerificationResult {
-                issuer: "issuer".into(),
-                subject: "subject".into(),
-            }),
-            &identities
-        )
-        .is_ok());
     }
 }

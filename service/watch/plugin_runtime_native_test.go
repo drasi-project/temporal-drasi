@@ -52,7 +52,6 @@ func blockedRuntimePluginPolicy(t *testing.T) (PluginPolicy, <-chan struct{}, fu
 	t.Cleanup(server.Close)
 	registry := strings.TrimPrefix(server.URL, "https://") + "/trusted"
 	policy := PluginPolicy{
-		Trust:    native.Trust{RegistryPrefixes: []string{registry}, Identities: []native.Identity{{Issuer: "issuer", Subject: "subject"}}},
 		Catalogs: []native.CatalogConfig{{ID: "trusted"}},
 	}
 	for _, release := range []struct{ version, digest string }{{"1.0.0", "a"}, {"2.0.0", "b"}} {
@@ -75,7 +74,7 @@ func TestPluginRuntimeFencesActualBlockedCompletion(t *testing.T) {
 	policy, started, release := blockedRuntimePluginPolicy(t)
 	runtime, err := native.Open(t.Context(), native.Config{
 		StateDir: filepath.Join(t.TempDir(), "runtime"), InstanceID: "management", OwnerEpoch: 1,
-		StartMode: native.StartModeDormant, Catalogs: policy.Catalogs, Trust: policy.Trust,
+		StartMode: native.StartModeDormant, Catalogs: policy.Catalogs,
 	})
 	require.NoError(t, err)
 	controller := newRuntimePlugins(runtime, "management", false, log.NewNoopLogger())
@@ -232,7 +231,7 @@ func TestServicePluginCutReachesCurrentAndNewNativeGraphs(t *testing.T) {
 	open := func(id string) *native.Runtime {
 		runtime, err := native.Open(t.Context(), native.Config{
 			InstanceID: id, OwnerEpoch: 1, StateDir: filepath.Join(t.TempDir(), "runtime"),
-			StartMode: native.StartModeDormant, Catalogs: policy.Catalogs, Trust: policy.Trust,
+			StartMode: native.StartModeDormant, Catalogs: policy.Catalogs,
 		})
 		require.NoError(t, err)
 		runtimes = append(runtimes, runtime)
